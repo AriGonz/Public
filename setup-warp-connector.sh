@@ -9,6 +9,7 @@
 #   - Architecture awareness (amd64 only officially supported)
 #   - Post-install instructions
 #   - Optional: enable IP forwarding (with confirmation)
+#   - Adds Enabled: false to pdm-enterprise.sources if missing
 
 set -euo pipefail
 
@@ -27,6 +28,28 @@ if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}Error: This script must be run as root${NC}"
     echo "Try: sudo bash $0"
     exit 1
+fi
+
+# ────────────────────────────────────────────────
+# 1.5. Handle pdm-enterprise.sources (add Enabled: false if not present)
+# ────────────────────────────────────────────────
+PDM_SOURCES="/etc/apt/sources.list.d/pdm-enterprise.sources"
+
+echo "Checking PDM Enterprise repository configuration..."
+
+if [[ -f "$PDM_SOURCES" ]]; then
+    if ! grep -qFx "Enabled: false" "$PDM_SOURCES"; then
+        echo "Adding 'Enabled: false' as first line to $PDM_SOURCES"
+        {
+            echo "Enabled: false"
+            cat "$PDM_SOURCES"
+        } > "${PDM_SOURCES}.tmp" && mv "${PDM_SOURCES}.tmp" "$PDM_SOURCES"
+        echo -e "${GREEN}→ 'Enabled: false' added to $PDM_SOURCES${NC}"
+    else
+        echo "→ 'Enabled: false' already present in $PDM_SOURCES"
+    fi
+else
+    echo "→ File $PDM_SOURCES not found — skipping this step"
 fi
 
 # ────────────────────────────────────────────────
