@@ -3,6 +3,7 @@
 # Script to switch Proxmox network from static IP to DHCP (dynamic).
 # WARNING: This may change your IP and break current connections. Set up Cloudflare Tunnel first!
 # Assumes interface is vmbr0; adjust if needed.
+# bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-static-to-dhcp.sh)"
 
 INTERFACE="vmbr0"
 CONFIG_FILE="/etc/network/interfaces"
