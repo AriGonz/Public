@@ -2,8 +2,7 @@
 # =============================================================================
 # Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed
 # =============================================================================
-# SSH keys section: now extracts only the first 64 lowercase hex characters
-# from the hash file content — very tolerant to formatting issues.
+# SSH keys are now embedded directly in the script (no remote fetch, no hash check)
 # =============================================================================
 # Run with:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
@@ -15,9 +14,6 @@ set -euo pipefail
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 
-KEYS_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys"
-HASH_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys_sha256"
-
 PVE_NOSUB_REPO="deb http://download.proxmox.com/debian/pve trixie pve-no-subscription"
 
 PVE_NOSUB_LIST="/etc/apt/sources.list.d/pve-no-subscription.list"
@@ -28,7 +24,15 @@ AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
 SSHD_CONFIG="/etc/ssh/sshd_config"
 BASHRC="/root/.bashrc"
 
-CURL_TIMEOUT=15
+# ──────────────────────────────────────────────────────────────────────────────
+# EMBEDDED SSH PUBLIC KEYS
+# ──────────────────────────────────────────────────────────────────────────────
+# These are your trusted keys — edit them here if you need to change/add/remove
+
+read -r -d '' TRUSTED_KEYS << 'EOF'
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAx0vHaUQfDPrVPLt8GhC8aCwRDVAZWa8wGL9/aPb7dQ eddsa-key-20260205
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDwF69AFzU724Y+F875vRApoudqQkuOhVZti65kyfNzK eddsa-key-20260205
+EOF
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
@@ -94,92 +98,29 @@ echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Fetch, verify & add SSH public keys (FIRST 64 HEX CHARS)
+# 2. Add embedded SSH public keys
 # ──────────────────────────────────────────────────────────────────────────────
 
-print_step "Fetching and verifying SSH public keys"
+print_step "Adding trusted SSH public keys (embedded)"
 
-TMP_KEYS=$(mktemp)
-TMP_HASH=$(mktemp)
-
-print_substep "Downloading keys..."
-if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_KEYS" "$KEYS_URL"; then
-    print_error "Failed to download keys from $KEYS_URL"
-    rm -f "$TMP_KEYS" "$TMP_HASH"
-    exit 1
-fi
-
-print_substep "Downloading expected SHA-256 hash..."
-if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_HASH" "$HASH_URL"; then
-    print_error "Failed to download hash from $HASH_URL"
-    rm -f "$TMP_KEYS" "$TMP_HASH"
-    exit 1
-fi
-
-# ── NEW APPROACH: Take only the first 64 lowercase hex characters ───────────
-HASH_RAW=$(cat "$TMP_HASH")
-# Extract first 64 chars that are 0-9a-fA-F, then force lowercase
-EXPECTED_HASH=$(echo "$HASH_RAW" | tr -cd '0-9a-fA-F' | tr '[:upper:]' '[:lower:]' | head -c 64)
-
-if [[ ${#EXPECTED_HASH} -lt 64 ]]; then
-    print_error "Could not extract 64 valid hex characters from the hash file"
-    print_error "Raw downloaded content was:"
-    echo "----------------------------------------"
-    echo "$HASH_RAW"
-    echo "----------------------------------------"
-    print_error "Extracted so far (length ${#EXPECTED_HASH}): $EXPECTED_HASH"
-    print_error "Please fix authorized_keys_sha256 on GitHub (should contain a valid SHA-256 hash)"
-    rm -f "$TMP_KEYS" "$TMP_HASH"
-    exit 1
-fi
-
-# We only use the first 64 chars — truncate explicitly
-EXPECTED_HASH="${EXPECTED_HASH:0:64}"
-
-ACTUAL_HASH=$(sha256sum "$TMP_KEYS" | cut -d' ' -f1)
-
-print_substep "Verifying SHA-256 hash..."
-echo "  Expected (short): ${EXPECTED_HASH:0:12}...${EXPECTED_HASH: -12}"
-echo "  Expected (full):  $EXPECTED_HASH"
-echo "  Actual   (short): ${ACTUAL_HASH:0:12}...${ACTUAL_HASH: -12}"
-echo "  Actual   (full):  $ACTUAL_HASH"
-
-KEYS_VERIFIED=0
-if [[ "$EXPECTED_HASH" == "$ACTUAL_HASH" ]]; then
-    print_success "Hash verification PASSED ✓ – keys are trusted"
-    KEYS_VERIFIED=1
-else
-    print_error "Hash verification FAILED ✗ – keys NOT trusted"
-    echo "  Aborting key addition for security reasons."
-fi
-
-# ── Parse keys only if verified ─────────────────────────────────────────────
 valid_keys=()
-if [[ $KEYS_VERIFIED -eq 1 ]]; then
-    mapfile -t lines < "$TMP_KEYS"
-    for line in "${lines[@]}"; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        [[ -z "$line" || "$line" =~ ^# ]] && continue
-        if [[ "$line" =~ ^ssh-(rsa|ed25519|ecdsa)- ]]; then
-            valid_keys+=("$line")
-        else
-            print_warning "Skipped invalid key line: ${line:0:50}..."
-        fi
-    done
+while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
+    line="${line%"${line##*[![:space:]]}"}"   # trim trailing whitespace
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    if [[ "$line" =~ ^ssh-(rsa|ed25519|ecdsa)- ]]; then
+        valid_keys+=("$line")
+    else
+        print_warning "Skipped invalid key line: ${line:0:50}..."
+    fi
+done <<< "$TRUSTED_KEYS"
 
-    print_substep "Found ${#valid_keys[@]} valid SSH key(s)"
-fi
+print_substep "Found ${#valid_keys[@]} valid key(s)"
 
-rm -f "$TMP_KEYS" "$TMP_HASH"
-echo ""
-sleep 1
-
-# ── Apply keys atomically only if verified ──────────────────────────────────
 SSH_KEYS_ADDED_SUCCESSFULLY=0
 
-if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
-    print_step "Applying verified SSH keys"
+if [[ ${#valid_keys[@]} -gt 0 ]]; then
+    print_step "Applying trusted SSH keys"
 
     mkdir -p "$SSH_DIR"
     chmod 700 "$SSH_DIR"
@@ -212,7 +153,7 @@ if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
     fi
 else
     print_step "SSH keys"
-    print_skip "Skipped (verification failed or no valid keys)"
+    print_skip "No valid keys defined"
 fi
 echo ""
 sleep 1
@@ -284,7 +225,7 @@ echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. SSH hardening – ONLY if keys were successfully added
+# 6. SSH hardening – ONLY if keys were successfully added/confirmed
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "SSH hardening (disable password login)"
@@ -323,8 +264,7 @@ if [[ $SSH_KEYS_ADDED_SUCCESSFULLY -eq 1 ]]; then
         print_skip "Password authentication remains enabled (user choice)"
     fi
 else
-    print_warning "Skipping SSH hardening – no keys were successfully added"
-    print_substep "Reason: Either hash verification failed or no valid keys were found"
+    print_warning "Skipping SSH hardening – no keys were added"
 fi
 echo ""
 sleep 1
@@ -345,9 +285,9 @@ print_success "System upgraded"
 [[ $REBOOT_NEEDED -eq 1 ]] && print_warning "Reboot recommended"
 
 if [[ $SSH_KEYS_ADDED_SUCCESSFULLY -eq 1 ]]; then
-    print_success "SSH keys added (${#valid_keys[@]} keys) – verified"
+    print_success "SSH keys added/confirmed (${#valid_keys[@]} keys)"
 else
-    print_warning "SSH keys NOT added (verification failed or no keys)"
+    print_warning "No new SSH keys added"
 fi
 
 [[ $SSH_HARDENED -eq 1 ]] && print_success "SSH hardened (password auth disabled)"
