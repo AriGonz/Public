@@ -5,6 +5,11 @@
 # Latest change:
 #   - SSH hardening (step 7) only runs if SSH key addition (step 6) succeeded
 # =============================================================================
+# Run with:
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
+# =============================================================================
+
+
 
 set -euo pipefail
 
