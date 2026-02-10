@@ -2,8 +2,8 @@
 # =============================================================================
 # Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed + 1s pauses
 # =============================================================================
-# SSH keys section significantly improved: better hash handling, atomic writes,
-# clearer output, length validation, truncated/full hash display.
+# SSH keys section: now trims/cleaned hash properly to handle trailing newlines,
+# extra spaces, etc. from GitHub or manual edits.
 # =============================================================================
 # Run with:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
@@ -94,7 +94,7 @@ echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Fetch, verify & add SSH public keys (IMPROVED VERSION)
+# 2. Fetch, verify & add SSH public keys (ROBUST HASH CLEANING)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Fetching and verifying SSH public keys"
@@ -116,13 +116,20 @@ if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_HASH" "$HASH_URL"; then
     exit 1
 fi
 
-# Clean hash: remove all whitespace/newlines, force lowercase
-EXPECTED_HASH=$(tr -d '[:space:]\n\r' < "$TMP_HASH" | tr '[:upper:]' '[:lower:]')
+# ── IMPROVED: Aggressive cleaning of hash ───────────────────────────────────
+# Remove ALL whitespace, newlines, carriage returns → force lowercase → validate
+EXPECTED_HASH_RAW=$(cat "$TMP_HASH")
+EXPECTED_HASH=$(echo -n "$EXPECTED_HASH_RAW" | tr -d '[:space:]\r\n' | tr '[:upper:]' '[:lower:]')
 
-# Validate hash format
+# Validate: exactly 64 hex characters
 if [[ ${#EXPECTED_HASH} -ne 64 ]] || [[ ! "$EXPECTED_HASH" =~ ^[0-9a-f]{64}$ ]]; then
-    print_error "Invalid expected hash format (must be exactly 64 lowercase hex chars)"
-    print_error "Check your authorized_keys_sha256 file on GitHub"
+    print_error "Invalid expected hash format after cleaning (must be exactly 64 lowercase hex chars)"
+    print_error "Raw downloaded hash content was:"
+    echo "----------------------------------------"
+    echo "$EXPECTED_HASH_RAW"
+    echo "----------------------------------------"
+    print_error "Cleaned result (length ${#EXPECTED_HASH}): $EXPECTED_HASH"
+    print_error "Please fix authorized_keys_sha256 on GitHub (one line, no spaces, no trailing newline)"
     rm -f "$TMP_KEYS" "$TMP_HASH"
     exit 1
 fi
@@ -149,7 +156,6 @@ valid_keys=()
 if [[ $KEYS_VERIFIED -eq 1 ]]; then
     mapfile -t lines < "$TMP_KEYS"
     for line in "${lines[@]}"; do
-        # Strip leading/trailing whitespace
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" || "$line" =~ ^# ]] && continue
@@ -177,7 +183,6 @@ if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
     chmod 700 "$SSH_DIR"
 
     TEMP_AUTH_KEYS=$(mktemp)
-    # Start with existing file if present
     [[ -f "$AUTHORIZED_KEYS" ]] && cp "$AUTHORIZED_KEYS" "$TEMP_AUTH_KEYS" || touch "$TEMP_AUTH_KEYS"
     chmod 600 "$TEMP_AUTH_KEYS"
 
