@@ -4,7 +4,7 @@
 # =============================================================================
 # Features:
 #   - Very clear step-by-step output with progress indicators
-#   - Visual boxes and separators
+#   - Aliases added FIRST so they're available even if script is interrupted
 #   - Skips already-done actions when safe
 #   - Confirmation before SSH hardening
 #
@@ -28,6 +28,8 @@ PROXMOXLIB_JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 SSH_DIR="/root/.ssh"
 AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
 SSHD_CONFIG="/etc/ssh/sshd_config"
+
+BASHRC="/root/.bashrc"
 
 CURL_TIMEOUT=15
 
@@ -80,7 +82,42 @@ fi
 print_header
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Fetch SSH public keys
+# 1. Add useful shell aliases (moved to first position)
+# ──────────────────────────────────────────────────────────────────────────────
+
+print_step "Adding useful shell aliases to /root/.bashrc (step 1)"
+
+ALIAS_MARKER="# --- Proxmox Post-Install Aliases (added $(date +%Y-%m-%d)) ---"
+
+if grep -qF "$ALIAS_MARKER" "$BASHRC" 2>/dev/null; then
+    print_skip "Aliases already present"
+else
+    print_substep "Appending aliases block..."
+
+    cat << 'EOF' >> "$BASHRC"
+
+# --- Proxmox Post-Install Aliases (added $(date +%Y-%m-%d)) ---
+alias ll='ls -lrt'               # Long listing, sorted by modification time (newest last)
+alias la='ls -A'                 # Show almost all files (including hidden)
+alias l='ls -CF'                 # Classic ls with file type indicators
+alias cls='clear && ls -lrt'     # Clear screen + recent files first
+alias dfh='df -h'                # Human-readable disk usage
+alias duh='du -sh * | sort -hr'  # Summarize dir sizes, sorted by size (largest first)
+alias aptu='apt update && apt list --upgradable'   # Quick check for updates
+alias aptup='apt update && apt full-upgrade -y'    # Full system upgrade
+alias j='journalctl -xe --no-pager'                # Last journal errors
+alias pvev='pveversion -v'                         # Show Proxmox version details
+# Add your own aliases below this line if needed
+EOF
+
+    print_success "Aliases added"
+    print_substep "To use them immediately, run: source /root/.bashrc"
+fi
+
+echo ""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. Fetch SSH public keys
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Fetching your SSH public keys"
@@ -92,7 +129,6 @@ if curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_KEYS" "$SSH_KEYS_URL"; then
     print_success "Keys downloaded successfully"
 else
     print_error "Failed to download keys from $SSH_KEYS_URL"
-    echo "  → Check your internet, the URL, or GitHub status."
     rm -f "$TMP_KEYS"
     exit 1
 fi
@@ -112,7 +148,7 @@ for key in "${PUBLIC_KEYS[@]}"; do
 done
 
 if [[ ${#valid_keys[@]} -eq 0 ]]; then
-    print_error "No valid SSH public keys found in the file"
+    print_error "No valid SSH public keys found"
     exit 1
 fi
 
@@ -120,12 +156,11 @@ print_success "Found ${#valid_keys[@]} valid public key(s)"
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Repositories
+# 3. Repositories
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Configuring APT repositories"
 
-# Disable enterprise repo
 if [[ -f "$PVE_ENTERPRISE_LIST" ]]; then
     if grep -q "^deb https://enterprise.proxmox.com" "$PVE_ENTERPRISE_LIST"; then
         print_substep "Disabling enterprise repository..."
@@ -138,7 +173,6 @@ else
     print_skip "Enterprise repo file not present"
 fi
 
-# Add no-subscription repo
 if [[ ! -f "$PVE_NOSUB_LIST" ]] || ! grep -qF "$PVE_NOSUBSCRIPTION_REPO" "$PVE_NOSUB_LIST"; then
     print_substep "Adding no-subscription repository..."
     echo "$PVE_NOSUBSCRIPTION_REPO" | tee "$PVE_NOSUB_LIST" >/dev/null
@@ -150,19 +184,19 @@ fi
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. Remove subscription nag
+# 4. Remove subscription nag
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Removing subscription nag popup (web UI)"
 
 if [[ ! -f "$PROXMOXLIB_JS" ]]; then
-    print_warning "proxmoxlib.js not found — skipping this step"
+    print_warning "proxmoxlib.js not found — skipping"
 else
     if grep -q "return false;" "$PROXMOXLIB_JS" && grep -q "if (false" "$PROXMOXLIB_JS"; then
         print_skip "Nag patch already applied"
     else
         BACKUP="${PROXMOXLIB_JS}.bak.$(date +%Y%m%d-%H%M%S)"
-        print_substep "Backing up original file → $BACKUP"
+        print_substep "Backing up → $BACKUP"
         cp -v "$PROXMOXLIB_JS" "$BACKUP"
 
         print_substep "Applying patch..."
@@ -174,14 +208,14 @@ fi
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. System update & upgrade
+# 5. System update & upgrade
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Updating package lists"
 apt update -qq
 print_success "Package lists updated"
 
-print_step "Upgrading installed packages (this may take a while)"
+print_step "Upgrading installed packages (may take several minutes)"
 apt full-upgrade -y
 print_success "System upgrade completed"
 
@@ -189,12 +223,12 @@ REBOOT_NEEDED=0
 [[ -f /var/run/reboot-required ]] && REBOOT_NEEDED=1
 
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
-    print_warning "Reboot is recommended after this upgrade"
+    print_warning "A reboot is recommended after this upgrade"
 fi
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Add SSH keys
+# 6. Add SSH keys
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Adding SSH public keys to root account"
@@ -226,13 +260,12 @@ chown root:root "$SSH_DIR" "$AUTHORIZED_KEYS"
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. SSH Hardening (optional)
+# 7. SSH Hardening (optional)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "SSH security hardening"
 echo "  WARNING: This will disable password login over SSH."
-echo "           Make sure key-based login works first!"
-echo "           Keys used: $SSH_KEYS_URL"
+echo "           Make sure your key works before confirming!"
 echo ""
 
 read -p "  Disable password authentication? (y/N): " -r CONFIRM
@@ -241,7 +274,7 @@ echo ""
 SSH_HARDENED=0
 
 if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-    print_substep "Creating backup of sshd_config..."
+    print_substep "Backing up sshd_config..."
     cp -v "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%Y%m%d-%H%M%S)"
 
     print_substep "Updating SSH configuration..."
@@ -249,21 +282,20 @@ if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
     sed -i 's/^#*PermitEmptyPasswords.*/PermitEmptyPasswords no/'   "$SSHD_CONFIG"
     sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/'  "$SSHD_CONFIG"
 
-    # Ensure lines exist
     grep -q "^PasswordAuthentication" "$SSHD_CONFIG" || echo "PasswordAuthentication no" >> "$SSHD_CONFIG"
     grep -q "^PermitEmptyPasswords"   "$SSHD_CONFIG" || echo "PermitEmptyPasswords no"   >> "$SSHD_CONFIG"
     grep -q "^PubkeyAuthentication"   "$SSHD_CONFIG" || echo "PubkeyAuthentication yes"  >> "$SSHD_CONFIG"
 
     print_substep "Restarting SSH service..."
     if systemctl restart sshd; then
-        print_success "SSH service restarted – password login disabled"
+        print_success "SSH restarted – password login disabled"
         SSH_HARDENED=1
     else
         print_error "Failed to restart sshd – check config manually!"
         exit 2
     fi
 else
-    print_skip "Password authentication remains enabled (user choice)"
+    print_skip "Password authentication remains enabled"
 fi
 
 echo ""
@@ -276,13 +308,13 @@ echo "┌───────────────────────�
 echo "│           SUMMARY             │"
 echo "└───────────────────────────────┘"
 
+print_success "Useful aliases added first (ll, cls, dfh, etc.)"
 print_success "Repositories configured"
 print_success "Subscription nag removed"
-print_success "System fully updated/upgraded"
+print_success "System updated & upgraded"
 [[ $REBOOT_NEEDED -eq 1 ]] && print_warning "Reboot recommended"
-print_success "SSH keys added (${#valid_keys[@]} keys processed)"
+print_success "SSH keys added (${#valid_keys[@]} keys)"
 [[ $SSH_HARDENED -eq 1 ]] && print_success "SSH hardened (password auth disabled)"
-[[ $SSH_HARDENED -eq 0 ]] && print_skip "SSH hardening skipped"
 
 echo ""
 echo "Script finished successfully."
@@ -290,8 +322,11 @@ echo ""
 
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
     echo "Recommended next step:"
-    echo "  sudo reboot"
+    echo "  reboot"
     echo ""
 fi
+
+echo "Tip: Run 'source /root/.bashrc' or open a new shell to use the new aliases right away."
+echo "     Try: ll    (to see files sorted by date)"
 
 exit 0
