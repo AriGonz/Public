@@ -2,11 +2,10 @@
 # =============================================================================
 # Proxmox VE 9.1.x Post-Install Configuration Script – Enhanced Visibility
 # =============================================================================
-# Features:
-#   - Very clear step-by-step output with progress indicators
-#   - Aliases added FIRST so they're available even if script is interrupted
-#   - Skips already-done actions when safe
-#   - Confirmation before SSH hardening
+# Security improvement:
+#   - Fetches SSH keys from GitHub
+#   - Verifies SHA-256 hash before using them
+#   - Only adds keys if hash matches
 #
 # Recommended run command:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
@@ -18,7 +17,9 @@ set -euo pipefail
 # CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 
-SSH_KEYS_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys"
+KEYS_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys"
+HASH_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys_sha256"
+
 PVE_NOSUBSCRIPTION_REPO="deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription"
 
 PVE_ENTERPRISE_LIST="/etc/apt/sources.list.d/pve-enterprise.list"
@@ -82,10 +83,10 @@ fi
 print_header
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Add useful shell aliases (moved to first position)
+# 1. Add useful shell aliases (first so they're available early)
 # ──────────────────────────────────────────────────────────────────────────────
 
-print_step "Adding useful shell aliases to /root/.bashrc (step 1)"
+print_step "Adding useful shell aliases to /root/.bashrc"
 
 ALIAS_MARKER="# --- Proxmox Post-Install Aliases (added $(date +%Y-%m-%d)) ---"
 
@@ -93,67 +94,103 @@ if grep -qF "$ALIAS_MARKER" "$BASHRC" 2>/dev/null; then
     print_skip "Aliases already present"
 else
     print_substep "Appending aliases block..."
-
     cat << 'EOF' >> "$BASHRC"
 
 # --- Proxmox Post-Install Aliases (added $(date +%Y-%m-%d)) ---
-alias ll='ls -lrt'               # Long listing, sorted by modification time (newest last)
-alias la='ls -A'                 # Show almost all files (including hidden)
-alias l='ls -CF'                 # Classic ls with file type indicators
-alias cls='clear && ls -lrt'     # Clear screen + recent files first
-alias dfh='df -h'                # Human-readable disk usage
-alias duh='du -sh * | sort -hr'  # Summarize dir sizes, sorted by size (largest first)
-alias aptu='apt update && apt list --upgradable'   # Quick check for updates
-alias aptup='apt update && apt full-upgrade -y'    # Full system upgrade
-alias j='journalctl -xe --no-pager'                # Last journal errors
-alias pvev='pveversion -v'                         # Show Proxmox version details
-# Add your own aliases below this line if needed
+alias ll='ls -lrt'               # Long listing, newest last
+alias la='ls -A'                 # Almost all files
+alias l='ls -CF'
+alias cls='clear && ls -lrt'
+alias dfh='df -h'
+alias duh='du -sh * | sort -hr'
+alias aptu='apt update && apt list --upgradable'
+alias aptup='apt update && apt full-upgrade -y'
+alias j='journalctl -xe --no-pager'
+alias pvev='pveversion -v'
 EOF
-
     print_success "Aliases added"
-    print_substep "To use them immediately, run: source /root/.bashrc"
+    print_substep "Run 'source /root/.bashrc' or open new shell to use them"
 fi
-
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Fetch SSH public keys
+# 2. Fetch & verify SSH public keys (with hash check)
 # ──────────────────────────────────────────────────────────────────────────────
 
-print_step "Fetching your SSH public keys"
-echo "  From: $SSH_KEYS_URL"
+print_step "Fetching and verifying SSH public keys"
 
 TMP_KEYS=$(mktemp)
+TMP_HASH=$(mktemp)
 
-if curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_KEYS" "$SSH_KEYS_URL"; then
-    print_success "Keys downloaded successfully"
-else
-    print_error "Failed to download keys from $SSH_KEYS_URL"
-    rm -f "$TMP_KEYS"
+print_substep "Downloading keys: $KEYS_URL"
+if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_KEYS" "$KEYS_URL"; then
+    print_error "Failed to download keys file"
+    rm -f "$TMP_KEYS" "$TMP_HASH"
     exit 1
 fi
 
-mapfile -t PUBLIC_KEYS < "$TMP_KEYS"
-rm -f "$TMP_KEYS"
+print_substep "Downloading expected SHA-256 hash: $HASH_URL"
+if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_HASH" "$HASH_URL"; then
+    print_error "Failed to download hash file"
+    rm -f "$TMP_KEYS" "$TMP_HASH"
+    exit 1
+fi
+
+# Clean the expected hash (remove whitespace, newlines, etc.)
+EXPECTED_HASH=$(tr -d '[:space:]\n\r' < "$TMP_HASH" | tr '[:upper:]' '[:lower:]')
+
+# Compute actual hash of the downloaded keys file
+ACTUAL_HASH=$(sha256sum "$TMP_KEYS" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')
+
+print_substep "Verifying SHA-256..."
+echo "  Expected: $EXPECTED_HASH"
+echo "  Actual:   $ACTUAL_HASH"
+
+if [[ "$EXPECTED_HASH" == "$ACTUAL_HASH" ]]; then
+    print_success "Hash verification PASSED – keys are trusted"
+    KEYS_VERIFIED=1
+else
+    print_error "Hash verification FAILED – keys NOT trusted"
+    echo "  The downloaded keys do NOT match the published hash."
+    echo "  Possible reasons: file changed, MITM attack, wrong repo/branch"
+    echo ""
+    echo "  Aborting key addition for security reasons."
+    rm -f "$TMP_KEYS" "$TMP_HASH"
+    KEYS_VERIFIED=0
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Only proceed to parse keys if verification passed
+# ──────────────────────────────────────────────────────────────────────────────
 
 valid_keys=()
-for key in "${PUBLIC_KEYS[@]}"; do
-    key="${key#"${key%%[![:space:]]*}"}"   # trim leading whitespace
-    [[ -z "$key" || "$key" =~ ^# ]] && continue
-    if [[ "$key" =~ ^ssh- ]]; then
-        valid_keys+=("$key")
-    else
-        print_warning "Skipping invalid line: ${key:0:60}..."
-    fi
-done
+if [[ $KEYS_VERIFIED -eq 1 ]]; then
+    mapfile -t PUBLIC_KEYS < "$TMP_KEYS"
 
-if [[ ${#valid_keys[@]} -eq 0 ]]; then
-    print_error "No valid SSH public keys found"
-    exit 1
+    for key in "${PUBLIC_KEYS[@]}"; do
+        key="${key#"${key%%[![:space:]]*}"}"   # trim leading whitespace
+        [[ -z "$key" || "$key" =~ ^# ]] && continue
+        if [[ "$key" =~ ^ssh- ]]; then
+            valid_keys+=("$key")
+        else
+            print_warning "Skipping invalid line: ${key:0:60}..."
+        fi
+    done
+
+    if [[ ${#valid_keys[@]} -eq 0 ]]; then
+        print_error "No valid SSH public keys found after parsing"
+        KEYS_VERIFIED=0
+    else
+        print_success "Found ${#valid_keys[@]} valid public key(s)"
+    fi
 fi
 
-print_success "Found ${#valid_keys[@]} valid public key(s)"
+rm -f "$TMP_KEYS" "$TMP_HASH"
 echo ""
+
+if [[ $KEYS_VERIFIED -ne 1 ]]; then
+    print_warning "Skipping SSH key addition due to failed verification or no valid keys"
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. Repositories
@@ -180,7 +217,6 @@ if [[ ! -f "$PVE_NOSUB_LIST" ]] || ! grep -qF "$PVE_NOSUBSCRIPTION_REPO" "$PVE_N
 else
     print_skip "No-subscription repo already configured"
 fi
-
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -204,7 +240,6 @@ else
         print_success "Subscription nag removed"
     fi
 fi
-
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -223,40 +258,46 @@ REBOOT_NEEDED=0
 [[ -f /var/run/reboot-required ]] && REBOOT_NEEDED=1
 
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
-    print_warning "A reboot is recommended after this upgrade"
+    print_warning "Reboot is recommended after this upgrade"
 fi
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. Add SSH keys
+# 6. Add SSH keys (only if verified)
 # ──────────────────────────────────────────────────────────────────────────────
 
-print_step "Adding SSH public keys to root account"
+if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
 
-mkdir -p "$SSH_DIR"
-chmod 700 "$SSH_DIR"
+    print_step "Adding verified SSH public keys to root account"
 
-touch "$AUTHORIZED_KEYS"
-chmod 600 "$AUTHORIZED_KEYS"
+    mkdir -p "$SSH_DIR"
+    chmod 700 "$SSH_DIR"
 
-added=0
-for key in "${valid_keys[@]}"; do
-    if grep -qF -- "$key" "$AUTHORIZED_KEYS" 2>/dev/null; then
-        print_substep "Key already present: ${key:0:50}..."
+    touch "$AUTHORIZED_KEYS"
+    chmod 600 "$AUTHORIZED_KEYS"
+
+    added=0
+    for key in "${valid_keys[@]}"; do
+        if grep -qF -- "$key" "$AUTHORIZED_KEYS" 2>/dev/null; then
+            print_substep "Key already present: ${key:0:50}..."
+        else
+            echo "$key" >> "$AUTHORIZED_KEYS"
+            print_substep "Added new key: ${key:0:50}..."
+            ((added++))
+        fi
+    done
+
+    if [[ $added -gt 0 ]]; then
+        print_success "$added new key(s) added"
     else
-        echo "$key" >> "$AUTHORIZED_KEYS"
-        print_substep "Added new key: ${key:0:50}..."
-        ((added++))
+        print_success "All keys were already present"
     fi
-done
 
-if [[ $added -gt 0 ]]; then
-    print_success "$added new key(s) added"
+    chown root:root "$SSH_DIR" "$AUTHORIZED_KEYS"
 else
-    print_success "All keys were already present"
+    print_step "SSH key addition"
+    print_skip "Skipped (keys not verified or no valid keys)"
 fi
-
-chown root:root "$SSH_DIR" "$AUTHORIZED_KEYS"
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -264,8 +305,8 @@ echo ""
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "SSH security hardening"
-echo "  WARNING: This will disable password login over SSH."
-echo "           Make sure your key works before confirming!"
+echo "  WARNING: This disables password login over SSH."
+echo "           Only continue if you already have key access!"
 echo ""
 
 read -p "  Disable password authentication? (y/N): " -r CONFIRM
@@ -297,7 +338,6 @@ if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
 else
     print_skip "Password authentication remains enabled"
 fi
-
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -308,25 +348,24 @@ echo "┌───────────────────────�
 echo "│           SUMMARY             │"
 echo "└───────────────────────────────┘"
 
-print_success "Useful aliases added first (ll, cls, dfh, etc.)"
+print_success "Useful aliases added"
 print_success "Repositories configured"
 print_success "Subscription nag removed"
 print_success "System updated & upgraded"
 [[ $REBOOT_NEEDED -eq 1 ]] && print_warning "Reboot recommended"
-print_success "SSH keys added (${#valid_keys[@]} keys)"
+if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
+    print_success "SSH keys added (${#valid_keys[@]} keys) – verified by SHA-256"
+else
+    print_warning "SSH keys NOT added (verification failed or no keys)"
+fi
 [[ $SSH_HARDENED -eq 1 ]] && print_success "SSH hardened (password auth disabled)"
 
 echo ""
-echo "Script finished successfully."
+echo "Script finished."
 echo ""
 
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
-    echo "Recommended next step:"
-    echo "  reboot"
-    echo ""
+    echo "Recommended next step: reboot"
 fi
-
-echo "Tip: Run 'source /root/.bashrc' or open a new shell to use the new aliases right away."
-echo "     Try: ll    (to see files sorted by date)"
 
 exit 0
