@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed + 1s pauses
+# Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed
 # =============================================================================
-# SSH keys section: now trims/cleaned hash properly to handle trailing newlines,
-# extra spaces, etc. from GitHub or manual edits.
+# SSH keys section: now extracts only the first 64 lowercase hex characters
+# from the hash file content — very tolerant to formatting issues.
 # =============================================================================
 # Run with:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
@@ -94,7 +94,7 @@ echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Fetch, verify & add SSH public keys (ROBUST HASH CLEANING)
+# 2. Fetch, verify & add SSH public keys (FIRST 64 HEX CHARS)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Fetching and verifying SSH public keys"
@@ -116,23 +116,25 @@ if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_HASH" "$HASH_URL"; then
     exit 1
 fi
 
-# ── IMPROVED: Aggressive cleaning of hash ───────────────────────────────────
-# Remove ALL whitespace, newlines, carriage returns → force lowercase → validate
-EXPECTED_HASH_RAW=$(cat "$TMP_HASH")
-EXPECTED_HASH=$(echo -n "$EXPECTED_HASH_RAW" | tr -d '[:space:]\r\n' | tr '[:upper:]' '[:lower:]')
+# ── NEW APPROACH: Take only the first 64 lowercase hex characters ───────────
+HASH_RAW=$(cat "$TMP_HASH")
+# Extract first 64 chars that are 0-9a-fA-F, then force lowercase
+EXPECTED_HASH=$(echo "$HASH_RAW" | tr -cd '0-9a-fA-F' | tr '[:upper:]' '[:lower:]' | head -c 64)
 
-# Validate: exactly 64 hex characters
-if [[ ${#EXPECTED_HASH} -ne 64 ]] || [[ ! "$EXPECTED_HASH" =~ ^[0-9a-f]{64}$ ]]; then
-    print_error "Invalid expected hash format after cleaning (must be exactly 64 lowercase hex chars)"
-    print_error "Raw downloaded hash content was:"
+if [[ ${#EXPECTED_HASH} -lt 64 ]]; then
+    print_error "Could not extract 64 valid hex characters from the hash file"
+    print_error "Raw downloaded content was:"
     echo "----------------------------------------"
-    echo "$EXPECTED_HASH_RAW"
+    echo "$HASH_RAW"
     echo "----------------------------------------"
-    print_error "Cleaned result (length ${#EXPECTED_HASH}): $EXPECTED_HASH"
-    print_error "Please fix authorized_keys_sha256 on GitHub (one line, no spaces, no trailing newline)"
+    print_error "Extracted so far (length ${#EXPECTED_HASH}): $EXPECTED_HASH"
+    print_error "Please fix authorized_keys_sha256 on GitHub (should contain a valid SHA-256 hash)"
     rm -f "$TMP_KEYS" "$TMP_HASH"
     exit 1
 fi
+
+# We only use the first 64 chars — truncate explicitly
+EXPECTED_HASH="${EXPECTED_HASH:0:64}"
 
 ACTUAL_HASH=$(sha256sum "$TMP_KEYS" | cut -d' ' -f1)
 
