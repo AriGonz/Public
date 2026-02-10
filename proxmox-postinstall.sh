@@ -2,8 +2,8 @@
 # =============================================================================
 # Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed + 1s pauses
 # =============================================================================
-# Original: https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh
-# Modified: Added sleep 1 between major sections for better readability
+# SSH keys section significantly improved: better hash handling, atomic writes,
+# clearer output, length validation, truncated/full hash display.
 # =============================================================================
 # Run with:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
@@ -94,7 +94,7 @@ echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Fetch & verify SSH keys
+# 2. Fetch, verify & add SSH public keys (IMPROVED VERSION)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Fetching and verifying SSH public keys"
@@ -104,56 +104,109 @@ TMP_HASH=$(mktemp)
 
 print_substep "Downloading keys..."
 if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_KEYS" "$KEYS_URL"; then
-    print_error "Failed to download keys"
+    print_error "Failed to download keys from $KEYS_URL"
     rm -f "$TMP_KEYS" "$TMP_HASH"
     exit 1
 fi
 
-print_substep "Downloading hash..."
+print_substep "Downloading expected SHA-256 hash..."
 if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_HASH" "$HASH_URL"; then
-    print_error "Failed to download hash file"
+    print_error "Failed to download hash from $HASH_URL"
     rm -f "$TMP_KEYS" "$TMP_HASH"
     exit 1
 fi
 
+# Clean hash: remove all whitespace/newlines, force lowercase
 EXPECTED_HASH=$(tr -d '[:space:]\n\r' < "$TMP_HASH" | tr '[:upper:]' '[:lower:]')
-ACTUAL_HASH=$(sha256sum "$TMP_KEYS" | cut -d' ' -f1 | tr '[:upper:]' '[:lower:]')
 
-print_substep "Verifying SHA-256..."
-echo "  Expected: $EXPECTED_HASH"
-echo "  Actual:   $ACTUAL_HASH"
+# Validate hash format
+if [[ ${#EXPECTED_HASH} -ne 64 ]] || [[ ! "$EXPECTED_HASH" =~ ^[0-9a-f]{64}$ ]]; then
+    print_error "Invalid expected hash format (must be exactly 64 lowercase hex chars)"
+    print_error "Check your authorized_keys_sha256 file on GitHub"
+    rm -f "$TMP_KEYS" "$TMP_HASH"
+    exit 1
+fi
+
+ACTUAL_HASH=$(sha256sum "$TMP_KEYS" | cut -d' ' -f1)
+
+print_substep "Verifying SHA-256 hash..."
+echo "  Expected (short): ${EXPECTED_HASH:0:12}...${EXPECTED_HASH: -12}"
+echo "  Expected (full):  $EXPECTED_HASH"
+echo "  Actual   (short): ${ACTUAL_HASH:0:12}...${ACTUAL_HASH: -12}"
+echo "  Actual   (full):  $ACTUAL_HASH"
 
 KEYS_VERIFIED=0
 if [[ "$EXPECTED_HASH" == "$ACTUAL_HASH" ]]; then
-    print_success "Hash verification PASSED"
+    print_success "Hash verification PASSED ✓ – keys are trusted"
     KEYS_VERIFIED=1
 else
-    print_error "Hash verification FAILED – keys NOT trusted"
-    echo "  Aborting key addition for security."
+    print_error "Hash verification FAILED ✗ – keys NOT trusted"
+    echo "  Aborting key addition for security reasons."
 fi
 
+# ── Parse keys only if verified ─────────────────────────────────────────────
 valid_keys=()
 if [[ $KEYS_VERIFIED -eq 1 ]]; then
-    mapfile -t PUBLIC_KEYS < "$TMP_KEYS"
-    for key in "${PUBLIC_KEYS[@]}"; do
-        key="${key#"${key%%[![:space:]]*}"}"
-        [[ -z "$key" || "$key" =~ ^# ]] && continue
-        if [[ "$key" =~ ^ssh- ]]; then
-            valid_keys+=("$key")
+    mapfile -t lines < "$TMP_KEYS"
+    for line in "${lines[@]}"; do
+        # Strip leading/trailing whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" =~ ^# ]] && continue
+        if [[ "$line" =~ ^ssh-(rsa|ed25519|ecdsa)- ]]; then
+            valid_keys+=("$line")
         else
-            print_warning "Invalid line skipped: ${key:0:50}..."
+            print_warning "Skipped invalid key line: ${line:0:50}..."
         fi
     done
 
-    if [[ ${#valid_keys[@]} -gt 0 ]]; then
-        print_success "Found ${#valid_keys[@]} valid key(s)"
-    else
-        print_error "No valid keys after parsing"
-        KEYS_VERIFIED=0
-    fi
+    print_substep "Found ${#valid_keys[@]} valid SSH key(s)"
 fi
 
 rm -f "$TMP_KEYS" "$TMP_HASH"
+echo ""
+sleep 1
+
+# ── Apply keys atomically only if verified ──────────────────────────────────
+SSH_KEYS_ADDED_SUCCESSFULLY=0
+
+if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
+    print_step "Applying verified SSH keys"
+
+    mkdir -p "$SSH_DIR"
+    chmod 700 "$SSH_DIR"
+
+    TEMP_AUTH_KEYS=$(mktemp)
+    # Start with existing file if present
+    [[ -f "$AUTHORIZED_KEYS" ]] && cp "$AUTHORIZED_KEYS" "$TEMP_AUTH_KEYS" || touch "$TEMP_AUTH_KEYS"
+    chmod 600 "$TEMP_AUTH_KEYS"
+
+    added=0
+    for key in "${valid_keys[@]}"; do
+        if grep -qF -- "$key" "$TEMP_AUTH_KEYS" 2>/dev/null; then
+            print_substep "Already present: ${key:0:48}…"
+        else
+            echo "$key" >> "$TEMP_AUTH_KEYS"
+            print_substep "Added new    : ${key:0:48}…"
+            ((added++))
+        fi
+    done
+
+    if [[ $added -gt 0 ]]; then
+        mv "$TEMP_AUTH_KEYS" "$AUTHORIZED_KEYS"
+        chmod 600 "$AUTHORIZED_KEYS"
+        chown root:root "$AUTHORIZED_KEYS"
+        print_success "$added new key(s) successfully added"
+        SSH_KEYS_ADDED_SUCCESSFULLY=1
+    else
+        rm -f "$TEMP_AUTH_KEYS"
+        print_success "No new keys needed – all were already present"
+        SSH_KEYS_ADDED_SUCCESSFULLY=1
+    fi
+else
+    print_step "SSH keys"
+    print_skip "Skipped (verification failed or no valid keys)"
+fi
 echo ""
 sleep 1
 
@@ -224,46 +277,7 @@ echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. Add SSH keys (if verified)
-# ──────────────────────────────────────────────────────────────────────────────
-
-SSH_KEYS_ADDED_SUCCESSFULLY=0
-
-if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
-    print_step "Adding verified SSH keys"
-    mkdir -p "$SSH_DIR"
-    chmod 700 "$SSH_DIR"
-    touch "$AUTHORIZED_KEYS"
-    chmod 600 "$AUTHORIZED_KEYS"
-
-    added=0
-    for key in "${valid_keys[@]}"; do
-        if grep -qF -- "$key" "$AUTHORIZED_KEYS"; then
-            print_substep "Already present: ${key:0:50}..."
-        else
-            echo "$key" >> "$AUTHORIZED_KEYS"
-            print_substep "Added: ${key:0:50}..."
-            ((added++))
-        fi
-    done
-
-    if [[ $added -gt 0 ]]; then
-        print_success "$added new key(s) added"
-    else
-        print_success "All keys were already present"
-    fi
-
-    chown root:root "$SSH_DIR" "$AUTHORIZED_KEYS"
-    SSH_KEYS_ADDED_SUCCESSFULLY=1
-else
-    print_step "SSH keys"
-    print_skip "Skipped (verification failed or no valid keys)"
-fi
-echo ""
-sleep 1
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 7. SSH hardening – ONLY if keys were successfully added
+# 6. SSH hardening – ONLY if keys were successfully added
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "SSH hardening (disable password login)"
