@@ -4,19 +4,17 @@
 # =============================================================================
 # Run as root on a fresh Proxmox VE installation.
 #
-# All important configurable values are collected at the top.
-# Usage:   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
+# Usage recommendation:
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
+#
+# SSH keys are now fetched from:
+#   https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys
 # =============================================================================
 
 # ──── CONFIGURATION VARIABLES ────────────────────────────────────────────────
 
-# SSH public keys to add to root (add more lines as needed)
-PUBLIC_KEYS=(
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAx0vHaUQfDPrVPLt8GhC8aCwRDVAZWa8wGL9/aPb7dQ eddsa-key-20260205"
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDwF69AFzU724Y+F875vRApoudqQkuOhVZti65kyfNzK eddsa-key-20260205"
-    # "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI.................................... your-new-key comment"
-    # "ssh-rsa    AAAAB3NzaC1yc2EAAAADAQABAAABAQ..................... another-key"
-)
+# URL where your authorized_keys file lives (one key per line)
+SSH_KEYS_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys"
 
 # Repositories
 PVE_NOSUBSCRIPTION_REPO="deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription"
@@ -30,6 +28,9 @@ PROXMOXLIB_JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 SSH_DIR="/root/.ssh"
 AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
 SSHD_CONFIG="/etc/ssh/sshd_config"
+
+# Timeout for curl (seconds)
+CURL_TIMEOUT=15
 
 # ──── END OF CONFIGURATION ───────────────────────────────────────────────────
 
@@ -48,6 +49,46 @@ echo ""
 echo "┌──────────────────────────────────────────────────────────────┐"
 echo "│     Proxmox VE 9.1.x Post-Install Configuration Script       │"
 echo "└──────────────────────────────────────────────────────────────┘"
+echo ""
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Fetch SSH public keys from remote URL
+# ──────────────────────────────────────────────────────────────────────────────
+echo "→ Fetching SSH public keys from:"
+echo "  $SSH_KEYS_URL"
+
+# Temporary file for downloaded keys
+TMP_KEYS=$(mktemp)
+
+if ! curl -fsSL --max-time "$CURL_TIMEOUT" -o "$TMP_KEYS" "$SSH_KEYS_URL"; then
+    echo "ERROR: Failed to download keys from $SSH_KEYS_URL" >&2
+    echo "       Check the URL, network, or GitHub availability." >&2
+    rm -f "$TMP_KEYS"
+    exit 1
+fi
+
+# Read keys into array, skipping invalid/empty/comment lines
+mapfile -t PUBLIC_KEYS < "$TMP_KEYS"
+rm -f "$TMP_KEYS"
+
+valid_keys_count=0
+for key in "${PUBLIC_KEYS[@]}"; do
+    # Skip empty lines and comments
+    [[ -z "${key// }" || "${key}" =~ ^[[:space:]]*# ]] && continue
+    # Basic validation: should start with ssh-rsa, ssh-ed25519, etc.
+    if [[ "$key" =~ ^ssh- ]]; then
+        ((valid_keys_count++))
+    else
+        echo "  Warning: Skipping invalid looking line: ${key:0:50}..."
+    fi
+done
+
+if [[ $valid_keys_count -eq 0 ]]; then
+    echo "ERROR: No valid SSH public keys found in the downloaded file." >&2
+    exit 1
+fi
+
+echo "  → Found $valid_keys_count valid key(s)"
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -119,17 +160,17 @@ echo ""
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. Add SSH public keys
 # ──────────────────────────────────────────────────────────────────────────────
-echo "→ Adding SSH public keys for root"
+echo "→ Adding SSH public keys for root (from remote file)"
 
 mkdir -p "$SSH_DIR"
 chmod 700 "$SSH_DIR"
 
-echo "  Processing ${#PUBLIC_KEYS[@]} key(s) (skipping duplicates)..."
+echo "  Processing keys (skipping duplicates)..."
 
 added_count=0
 for key in "${PUBLIC_KEYS[@]}"; do
     # Skip empty lines and comments
-    [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${key// }" || "${key}" =~ ^[[:space:]]*# ]] && continue
 
     if ! grep -qF -- "$key" "$AUTHORIZED_KEYS" 2>/dev/null; then
         echo "$key" >> "$AUTHORIZED_KEYS"
@@ -155,7 +196,8 @@ echo ""
 # 5. SSH Hardening – disable password auth
 # ──────────────────────────────────────────────────────────────────────────────
 echo "WARNING: Next step will DISABLE password authentication over SSH."
-echo "         Make sure you can log in with one of the keys above!"
+echo "         Make sure you can log in with one of the keys from:"
+echo "         $SSH_KEYS_URL"
 echo ""
 
 read -p "Disable password login? (y/N): " -r CONFIRM
@@ -168,7 +210,6 @@ if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
 
     cp -v "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%Y%m%d-%H%M%S)"
 
-    # Update or add settings
     sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CONFIG"
     sed -i 's/^#*PermitEmptyPasswords.*/PermitEmptyPasswords no/'   "$SSHD_CONFIG"
     sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/'  "$SSHD_CONFIG"
@@ -202,7 +243,7 @@ echo "• No-subscription repo enabled"
 echo "• Subscription nag removed"
 echo "• System updated & upgraded"
 [[ $REBOOT_NEEDED -eq 1 ]] && echo "  → Reboot recommended"
-echo "• SSH keys processed (${#PUBLIC_KEYS[@]} configured)"
+echo "• SSH keys fetched from remote URL and processed"
 [[ $SSH_HARDENED -eq 1 ]] && echo "• SSH hardened (password auth disabled)"
 [[ $SSH_HARDENED -eq 0 ]] && echo "• SSH hardening skipped"
 
