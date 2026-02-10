@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed
+# Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed + 1s pauses
 # =============================================================================
-# Latest change:
-#   - SSH hardening (step 7) only runs if SSH key addition (step 6) succeeded
+# Original: https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh
+# Modified: Added sleep 1 between major sections for better readability
 # =============================================================================
 # Run with:
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
 # =============================================================================
 
-
-
 set -euo pipefail
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION (unchanged)
+# CONFIGURATION
 # ──────────────────────────────────────────────────────────────────────────────
 
 KEYS_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys"
@@ -33,7 +31,7 @@ BASHRC="/root/.bashrc"
 CURL_TIMEOUT=15
 
 # ──────────────────────────────────────────────────────────────────────────────
-# HELPER FUNCTIONS (unchanged)
+# HELPER FUNCTIONS
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_header() {
@@ -52,7 +50,7 @@ print_warning() { echo "  ⚠  $1"; }
 print_error() { echo "  ✗ ERROR: $1" >&2; }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# START (unchanged)
+# START
 # ──────────────────────────────────────────────────────────────────────────────
 
 if [[ $EUID -ne 0 ]]; then
@@ -61,9 +59,10 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 print_header
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Add useful shell aliases (first) – unchanged
+# 1. Add useful shell aliases
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Adding useful shell aliases to /root/.bashrc"
@@ -92,9 +91,10 @@ EOF
     print_substep "Run: source /root/.bashrc  to use them now"
 fi
 echo ""
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Fetch & verify SSH keys (unchanged)
+# 2. Fetch & verify SSH keys
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Fetching and verifying SSH public keys"
@@ -155,9 +155,10 @@ fi
 
 rm -f "$TMP_KEYS" "$TMP_HASH"
 echo ""
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. Clean & configure repositories (unchanged)
+# 3. Clean & configure repositories
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Cleaning and configuring APT repositories"
@@ -179,9 +180,10 @@ else
     print_skip "PVE no-subscription repo already correct"
 fi
 echo ""
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Remove subscription nag (unchanged)
+# 4. Remove subscription nag (web UI)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Removing subscription nag (web UI)"
@@ -198,9 +200,10 @@ else
     fi
 fi
 echo ""
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Update & upgrade (unchanged)
+# 5. Update & upgrade
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Updating package lists"
@@ -218,9 +221,10 @@ REBOOT_NEEDED=0
 [[ -f /var/run/reboot-required ]] && REBOOT_NEEDED=1
 [[ $REBOOT_NEEDED -eq 1 ]] && print_warning "Reboot recommended"
 echo ""
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. Add SSH keys (if verified) – unchanged, but we now track success
+# 6. Add SSH keys (if verified)
 # ──────────────────────────────────────────────────────────────────────────────
 
 SSH_KEYS_ADDED_SUCCESSFULLY=0
@@ -256,6 +260,7 @@ else
     print_skip "Skipped (verification failed or no valid keys)"
 fi
 echo ""
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 7. SSH hardening – ONLY if keys were successfully added
@@ -301,6 +306,7 @@ else
     print_substep "Reason: Either hash verification failed or no valid keys were found"
 fi
 echo ""
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SUMMARY
@@ -332,5 +338,7 @@ if [[ $REBOOT_NEEDED -eq 1 ]]; then
     echo "Recommended next step: reboot"
 fi
 echo ""
+
+sleep 1
 
 exit 0
