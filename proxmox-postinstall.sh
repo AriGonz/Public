@@ -1,28 +1,21 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Proxmox VE 9.1.x Post-Install Configuration Script – Enhanced & Fixed
+# Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed
 # =============================================================================
-# Changes in this version:
-#   - Aggressive disabling of ALL enterprise repositories
-#   - Handles Ceph enterprise repo (comments it out)
-#   - Uses 'trixie' for Proxmox 9.x no-subscription repo
-#   - Keeps SHA-256 verification of SSH keys
-#
-# Run with:
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
+# Latest change:
+#   - SSH hardening (step 7) only runs if SSH key addition (step 6) succeeded
 # =============================================================================
 
 set -euo pipefail
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION
+# CONFIGURATION (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
 KEYS_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys"
 HASH_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys_sha256"
 
 PVE_NOSUB_REPO="deb http://download.proxmox.com/debian/pve trixie pve-no-subscription"
-CEPH_NOSUB_REPO="deb http://download.proxmox.com/debian/ceph-squid trixie no-subscription"  # uncomment if you use Ceph
 
 PVE_NOSUB_LIST="/etc/apt/sources.list.d/pve-no-subscription.list"
 PROXMOXLIB_JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
@@ -35,7 +28,7 @@ BASHRC="/root/.bashrc"
 CURL_TIMEOUT=15
 
 # ──────────────────────────────────────────────────────────────────────────────
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_header() {
@@ -54,7 +47,7 @@ print_warning() { echo "  ⚠  $1"; }
 print_error() { echo "  ✗ ERROR: $1" >&2; }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# START
+# START (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
 if [[ $EUID -ne 0 ]]; then
@@ -65,7 +58,7 @@ fi
 print_header
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Add useful shell aliases (first)
+# 1. Add useful shell aliases (first) – unchanged
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Adding useful shell aliases to /root/.bashrc"
@@ -96,7 +89,7 @@ fi
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. Fetch & verify SSH keys
+# 2. Fetch & verify SSH keys (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Fetching and verifying SSH public keys"
@@ -159,28 +152,20 @@ rm -f "$TMP_KEYS" "$TMP_HASH"
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. Clean & configure repositories (improved)
+# 3. Clean & configure repositories (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Cleaning and configuring APT repositories"
 
-# Disable ALL enterprise repos everywhere
 print_substep "Disabling enterprise repositories..."
 find /etc/apt/sources.list /etc/apt/sources.list.d -type f -exec sed -i 's/^deb https:\/\/enterprise.proxmox.com/#deb https:\/\/enterprise.proxmox.com/' {} \;
 print_success "All enterprise lines commented out"
 
-# Remove Ceph enterprise repo if present
 if [[ -f /etc/apt/sources.list.d/ceph.list ]]; then
-    print_substep "Found ceph.list – commenting enterprise Ceph lines..."
+    print_substep "Commenting Ceph enterprise lines..."
     sed -i 's/^deb https:\/\/enterprise.proxmox.com/#deb https:\/\/enterprise.proxmox.com/' /etc/apt/sources.list.d/ceph.list
-    # Optional: add no-subscription Ceph repo (uncomment if you use Ceph)
-    # if ! grep -qF "$CEPH_NOSUB_REPO" /etc/apt/sources.list.d/ceph.list; then
-    #     echo "$CEPH_NOSUB_REPO" >> /etc/apt/sources.list.d/ceph.list
-    #     print_success "Added Ceph no-subscription repo"
-    # fi
 fi
 
-# Ensure correct no-subscription PVE repo
 print_substep "Configuring pve-no-subscription repo..."
 if [[ ! -f "$PVE_NOSUB_LIST" ]] || ! grep -qF "$PVE_NOSUB_REPO" "$PVE_NOSUB_LIST"; then
     echo "$PVE_NOSUB_REPO" | tee "$PVE_NOSUB_LIST" >/dev/null
@@ -188,11 +173,10 @@ if [[ ! -f "$PVE_NOSUB_LIST" ]] || ! grep -qF "$PVE_NOSUB_REPO" "$PVE_NOSUB_LIST
 else
     print_skip "PVE no-subscription repo already correct"
 fi
-
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Remove subscription nag
+# 4. Remove subscription nag (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Removing subscription nag (web UI)"
@@ -211,12 +195,12 @@ fi
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Update & upgrade
+# 5. Update & upgrade (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "Updating package lists"
 if ! apt update; then
-    print_warning "apt update had warnings/errors – check output above"
+    print_warning "apt update had warnings/errors – check output"
 else
     print_success "Package lists updated"
 fi
@@ -228,12 +212,13 @@ print_success "Upgrade completed"
 REBOOT_NEEDED=0
 [[ -f /var/run/reboot-required ]] && REBOOT_NEEDED=1
 [[ $REBOOT_NEEDED -eq 1 ]] && print_warning "Reboot recommended"
-
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. Add SSH keys (if verified)
+# 6. Add SSH keys (if verified) – unchanged, but we now track success
 # ──────────────────────────────────────────────────────────────────────────────
+
+SSH_KEYS_ADDED_SUCCESSFULLY=0
 
 if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
     print_step "Adding verified SSH keys"
@@ -253,8 +238,14 @@ if [[ $KEYS_VERIFIED -eq 1 && ${#valid_keys[@]} -gt 0 ]]; then
         fi
     done
 
-    [[ $added -gt 0 ]] && print_success "$added new key(s) added" || print_success "All keys already present"
+    if [[ $added -gt 0 ]]; then
+        print_success "$added new key(s) added"
+    else
+        print_success "All keys were already present"
+    fi
+
     chown root:root "$SSH_DIR" "$AUTHORIZED_KEYS"
+    SSH_KEYS_ADDED_SUCCESSFULLY=1
 else
     print_step "SSH keys"
     print_skip "Skipped (verification failed or no valid keys)"
@@ -262,33 +253,47 @@ fi
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 7. SSH hardening (optional)
+# 7. SSH hardening – ONLY if keys were successfully added
 # ──────────────────────────────────────────────────────────────────────────────
 
 print_step "SSH hardening (disable password login)"
-echo "  WARNING: Only proceed if key login is already working!"
-read -p "  Disable password auth? (y/N): " -r CONFIRM
-echo ""
 
-SSH_HARDENED=0
-if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-    cp -v "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%Y%m%d-%H%M%S)"
-    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CONFIG"
-    sed -i 's/^#*PermitEmptyPasswords.*/PermitEmptyPasswords no/' "$SSHD_CONFIG"
-    sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_CONFIG"
+if [[ $SSH_KEYS_ADDED_SUCCESSFULLY -eq 1 ]]; then
+    echo "  WARNING: This will disable password authentication."
+    echo "           Make sure key-based login works before confirming!"
+    echo ""
 
-    grep -q "^PasswordAuthentication" "$SSHD_CONFIG" || echo "PasswordAuthentication no" >> "$SSHD_CONFIG"
-    grep -q "^PermitEmptyPasswords"   "$SSHD_CONFIG" || echo "PermitEmptyPasswords no"   >> "$SSHD_CONFIG"
-    grep -q "^PubkeyAuthentication"   "$SSHD_CONFIG" || echo "PubkeyAuthentication yes"  >> "$SSHD_CONFIG"
+    read -p "  Disable password authentication? (y/N): " -r CONFIRM
+    echo ""
 
-    if systemctl restart sshd; then
-        print_success "SSH restarted – password login disabled"
-        SSH_HARDENED=1
+    SSH_HARDENED=0
+    if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
+        print_substep "Backing up sshd_config..."
+        cp -v "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%Y%m%d-%H%M%S)"
+
+        print_substep "Updating SSH configuration..."
+        sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CONFIG"
+        sed -i 's/^#*PermitEmptyPasswords.*/PermitEmptyPasswords no/' "$SSHD_CONFIG"
+        sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_CONFIG"
+
+        grep -q "^PasswordAuthentication" "$SSHD_CONFIG" || echo "PasswordAuthentication no" >> "$SSHD_CONFIG"
+        grep -q "^PermitEmptyPasswords"   "$SSHD_CONFIG" || echo "PermitEmptyPasswords no"   >> "$SSHD_CONFIG"
+        grep -q "^PubkeyAuthentication"   "$SSHD_CONFIG" || echo "PubkeyAuthentication yes"  >> "$SSHD_CONFIG"
+
+        print_substep "Restarting SSH service..."
+        if systemctl restart sshd; then
+            print_success "SSH restarted – password login disabled"
+            SSH_HARDENED=1
+        else
+            print_error "Failed to restart sshd – check your config!"
+            exit 2
+        fi
     else
-        print_error "Failed to restart sshd"
+        print_skip "Password authentication remains enabled (user choice)"
     fi
 else
-    print_skip "Password auth remains enabled"
+    print_warning "Skipping SSH hardening – no keys were successfully added"
+    print_substep "Reason: Either hash verification failed or no valid keys were found"
 fi
 echo ""
 
@@ -306,13 +311,20 @@ print_success "PVE no-subscription repo configured"
 print_success "Subscription nag removed"
 print_success "System upgraded"
 [[ $REBOOT_NEEDED -eq 1 ]] && print_warning "Reboot recommended"
-[[ $KEYS_VERIFIED -eq 1 ]] && print_success "SSH keys added (${#valid_keys[@]} keys)" || print_warning "SSH keys NOT added (hash mismatch)"
-[[ $SSH_HARDENED -eq 1 ]] && print_success "SSH hardened"
+
+if [[ $SSH_KEYS_ADDED_SUCCESSFULLY -eq 1 ]]; then
+    print_success "SSH keys added (${#valid_keys[@]} keys) – verified"
+else
+    print_warning "SSH keys NOT added (verification failed or no keys)"
+fi
+
+[[ $SSH_HARDENED -eq 1 ]] && print_success "SSH hardened (password auth disabled)"
+[[ $SSH_KEYS_ADDED_SUCCESSFULLY -eq 1 && $SSH_HARDENED -eq 0 ]] && print_skip "SSH hardening skipped by user"
 
 echo ""
-echo "Done."
+echo "Script finished."
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
-    echo "→ Suggested: reboot"
+    echo "Recommended next step: reboot"
 fi
 echo ""
 
