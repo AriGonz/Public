@@ -194,7 +194,14 @@ done
 [[ $added -eq 0 ]] && print_info "All keys were already present"
 
 chmod 600 "$AUTHORIZED_KEYS"
-chown root:root "$SSH_DIR" "$AUTHORIZED_KEYS"
+
+# Explicit chown with basic error handling
+if ! chown root:root "$SSH_DIR" "$AUTHORIZED_KEYS" 2>/dev/null; then
+    print_warning "chown failed - checking current permissions"
+    ls -ld "$SSH_DIR" "$AUTHORIZED_KEYS"
+else
+    print_success "Permissions set correctly for SSH directory and keys"
+fi
 
 SSH_KEYS_PRESENT=0
 if [[ -s "$AUTHORIZED_KEYS" ]] && grep -qE "^ssh-(rsa|ed25519|ecdsa)" "$AUTHORIZED_KEYS"; then
