@@ -1,305 +1,282 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Proxmox VE 9.x Post-Install Configuration Script – Enhanced & Fixed
+# Proxmox VE 9.1.x Post-Install Hardening & Configuration Script
 # =============================================================================
-# SSH keys are now embedded directly in the script (no remote fetch, no hash check)
-# =============================================================================
-# Run with:
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
+# Run as root on a fresh Proxmox VE installation.
+#
+# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/.../proxmox-postinstall.sh)"
 # =============================================================================
 
 set -euo pipefail
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION
-# ──────────────────────────────────────────────────────────────────────────────
+# ──── CONFIGURATION VARIABLES ────────────────────────────────────────────────
+PUBLIC_KEYS=(
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAx0vHaUQfDPrVPLt8GhC8aCwRDVAZWa8wGL9/aPb7dQ eddsa-key-20260205"
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDwF69AFzU724Y+F875vRApoudqQkuOhVZti65kyfNzK eddsa-key-20260205"
+    # Add more keys here if needed
+)
 
-PVE_NOSUB_REPO="deb http://download.proxmox.com/debian/pve trixie pve-no-subscription"
-
+PVE_NOSUBSCRIPTION_REPO="deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription"
+PVE_ENTERPRISE_LIST="/etc/apt/sources.list.d/pve-enterprise.list"
 PVE_NOSUB_LIST="/etc/apt/sources.list.d/pve-no-subscription.list"
+
 PROXMOXLIB_JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 
 SSH_DIR="/root/.ssh"
 AUTHORIZED_KEYS="${SSH_DIR}/authorized_keys"
 SSHD_CONFIG="/etc/ssh/sshd_config"
-BASHRC="/root/.bashrc"
+
+# ──── END OF CONFIGURATION ───────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────────────────────
-# EMBEDDED SSH PUBLIC KEYS
+# 0. Initial checks & required tools installation
 # ──────────────────────────────────────────────────────────────────────────────
-# These are your trusted keys — edit them here if you need to change/add/remove
+clear
+echo "┌──────────────────────────────────────────────────────────────┐"
+echo "│   Proxmox VE 9.1.x Post-Install Configuration Script    │"
+echo "└──────────────────────────────────────────────────────────────┘"
+echo ""
 
-read -r -d '' TRUSTED_KEYS << 'EOF'
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAx0vHaUQfDPrVPLt8GhC8aCwRDVAZWa8wGL9/aPb7dQ eddsa-key-20260205
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDwF69AFzU724Y+F875vRApoudqQkuOhVZti65kyfNzK eddsa-key-20260205
-EOF
+echo "→ Checking and installing basic required tools..."
+sleep 1
+
+PACKAGES_TO_INSTALL=""
+command -v lsb_release >/dev/null 2>&1 || PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL lsb-release"
+command -v curl       >/dev/null 2>&1 || PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL curl"
+command -v nano       >/dev/null 2>&1 || PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL nano"
+command -v vim        >/dev/null 2>&1 || PACKAGES_TO_INSTALL="$PACKAGES_TO_INSTALL vim"
+
+if [[ -n "$PACKAGES_TO_INSTALL" ]]; then
+    echo " Installing missing packages: $PACKAGES_TO_INSTALL"
+    apt update -qq
+    apt install -y $PACKAGES_TO_INSTALL
+    echo " Basic tools installed."
+else
+    echo " All required tools already installed."
+fi
+
+echo ""
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# HELPER FUNCTIONS
+# Check root privileges
 # ──────────────────────────────────────────────────────────────────────────────
-
-print_header() {
-    echo ""
-    echo "┌──────────────────────────────────────────────────────────────┐"
-    echo "│   Proxmox VE 9.x – Post-Install Configuration (Fixed)        │"
-    echo "└──────────────────────────────────────────────────────────────┘"
-    echo ""
-}
-
-print_step() { echo "→ $1"; }
-print_substep() { echo "  • $1"; }
-print_success() { echo "  ✓ $1"; }
-print_skip() { echo "  (already done) $1"; }
-print_warning() { echo "  ⚠  $1"; }
-print_error() { echo "  ✗ ERROR: $1" >&2; }
-
-# ──────────────────────────────────────────────────────────────────────────────
-# START
-# ──────────────────────────────────────────────────────────────────────────────
-
 if [[ $EUID -ne 0 ]]; then
-    print_error "This script must be run as root"
+    echo "Error: This script must be run as root" >&2
+    echo " Try: sudo bash $0" >&2
     exit 1
 fi
 
-print_header
-sleep 1
-
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Add useful shell aliases
+# 1. Repository configuration
 # ──────────────────────────────────────────────────────────────────────────────
-
-print_step "Adding useful shell aliases to /root/.bashrc"
-
-ALIAS_MARKER="# --- Proxmox Post-Install Aliases ---"
-
-if grep -qF "$ALIAS_MARKER" "$BASHRC" 2>/dev/null; then
-    print_skip "Aliases already present"
-else
-    print_substep "Appending aliases..."
-    cat << 'EOF' >> "$BASHRC"
-
-# --- Proxmox Post-Install Aliases ---
-alias ll='ls -lrt'
-alias la='ls -A'
-alias l='ls -CF'
-alias cls='clear && ls -lrt'
-alias dfh='df -h'
-alias duh='du -sh * | sort -hr'
-alias aptu='apt update && apt list --upgradable'
-alias aptup='apt update && apt full-upgrade -y'
-alias j='journalctl -xe --no-pager'
-alias pvev='pveversion -v'
-EOF
-    print_success "Aliases added"
-    print_substep "Run: source /root/.bashrc  to use them now"
-fi
+echo "┌─────────────────────────────┐"
+echo "│ 1. Configuring Repositories │"
+echo "└─────────────────────────────┘"
 echo ""
 sleep 1
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. Add embedded SSH public keys
-# ──────────────────────────────────────────────────────────────────────────────
-
-print_step "Adding trusted SSH public keys (embedded)"
-
-valid_keys=()
-while IFS= read -r line; do
-    line="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
-    line="${line%"${line##*[![:space:]]}"}"   # trim trailing whitespace
-    [[ -z "$line" || "$line" =~ ^# ]] && continue
-    if [[ "$line" =~ ^ssh-(rsa|ed25519|ecdsa)- ]]; then
-        valid_keys+=("$line")
+if [[ -f "$PVE_ENTERPRISE_LIST" ]]; then
+    if ! grep -q "^# deb https://enterprise.proxmox.com/debian/pve" "$PVE_ENTERPRISE_LIST"; then
+        echo " Disabling enterprise repository..."
+        sed -i 's/^deb/#deb/' "$PVE_ENTERPRISE_LIST"
     else
-        print_warning "Skipped invalid key line: ${line:0:50}..."
-    fi
-done <<< "$TRUSTED_KEYS"
-
-print_substep "Found ${#valid_keys[@]} valid key(s)"
-
-SSH_KEYS_ADDED_SUCCESSFULLY=0
-
-if [[ ${#valid_keys[@]} -gt 0 ]]; then
-    print_step "Applying trusted SSH keys"
-
-    mkdir -p "$SSH_DIR"
-    chmod 700 "$SSH_DIR"
-
-    TEMP_AUTH_KEYS=$(mktemp)
-    [[ -f "$AUTHORIZED_KEYS" ]] && cp "$AUTHORIZED_KEYS" "$TEMP_AUTH_KEYS" || touch "$TEMP_AUTH_KEYS"
-    chmod 600 "$TEMP_AUTH_KEYS"
-
-    added=0
-    for key in "${valid_keys[@]}"; do
-        if grep -qF -- "$key" "$TEMP_AUTH_KEYS" 2>/dev/null; then
-            print_substep "Already present: ${key:0:48}…"
-        else
-            echo "$key" >> "$TEMP_AUTH_KEYS"
-            print_substep "Added new    : ${key:0:48}…"
-            ((added++))
-        fi
-    done
-
-    if [[ $added -gt 0 ]]; then
-        mv "$TEMP_AUTH_KEYS" "$AUTHORIZED_KEYS"
-        chmod 600 "$AUTHORIZED_KEYS"
-        chown root:root "$AUTHORIZED_KEYS"
-        print_success "$added new key(s) successfully added"
-        SSH_KEYS_ADDED_SUCCESSFULLY=1
-    else
-        rm -f "$TEMP_AUTH_KEYS"
-        print_success "No new keys needed – all were already present"
-        SSH_KEYS_ADDED_SUCCESSFULLY=1
+        echo " Enterprise repo already disabled."
     fi
 else
-    print_step "SSH keys"
-    print_skip "No valid keys defined"
-fi
-echo ""
-sleep 1
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3. Clean & configure repositories
-# ──────────────────────────────────────────────────────────────────────────────
-
-print_step "Cleaning and configuring APT repositories"
-
-print_substep "Disabling enterprise repositories..."
-find /etc/apt/sources.list /etc/apt/sources.list.d -type f -exec sed -i 's/^deb https:\/\/enterprise.proxmox.com/#deb https:\/\/enterprise.proxmox.com/' {} \;
-print_success "All enterprise lines commented out"
-
-if [[ -f /etc/apt/sources.list.d/ceph.list ]]; then
-    print_substep "Commenting Ceph enterprise lines..."
-    sed -i 's/^deb https:\/\/enterprise.proxmox.com/#deb https:\/\/enterprise.proxmox.com/' /etc/apt/sources.list.d/ceph.list
+    echo " Enterprise repo file not found (already removed)."
 fi
 
-print_substep "Configuring pve-no-subscription repo..."
-if [[ ! -f "$PVE_NOSUB_LIST" ]] || ! grep -qF "$PVE_NOSUB_REPO" "$PVE_NOSUB_LIST"; then
-    echo "$PVE_NOSUB_REPO" | tee "$PVE_NOSUB_LIST" >/dev/null
-    print_success "PVE no-subscription repo added/updated (trixie)"
+if [[ ! -f "$PVE_NOSUB_LIST" ]] || ! grep -qF "$PVE_NOSUBSCRIPTION_REPO" "$PVE_NOSUB_LIST"; then
+    echo " Adding no-subscription repository..."
+    echo "$PVE_NOSUBSCRIPTION_REPO" | tee "$PVE_NOSUB_LIST" >/dev/null
 else
-    print_skip "PVE no-subscription repo already correct"
+    echo " No-subscription repo already configured."
 fi
+
 echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Remove subscription nag (web UI)
+# 2. Remove subscription nag
 # ──────────────────────────────────────────────────────────────────────────────
+echo "┌─────────────────────────────┐"
+echo "│ 2. Removing Subscription Nag│"
+echo "└─────────────────────────────┘"
+echo ""
+sleep 1
 
-print_step "Removing subscription nag (web UI)"
 if [[ ! -f "$PROXMOXLIB_JS" ]]; then
-    print_warning "proxmoxlib.js not found – skipping"
+    echo " Warning: $PROXMOXLIB_JS not found — skipping patch."
 else
-    if grep -q "if (false" "$PROXMOXLIB_JS"; then
-        print_skip "Nag patch already applied"
+    if grep -q "return false;" "$PROXMOXLIB_JS" && grep -q "if (res === null" "$PROXMOXLIB_JS"; then
+        echo " Subscription nag patch already applied."
     else
-        BACKUP="${PROXMOXLIB_JS}.bak.$(date +%Y%m%d-%H%M%S)"
-        cp -v "$PROXMOXLIB_JS" "$BACKUP"
+        BACKUP_FILE="${PROXMOXLIB_JS}.bak.$(date +%Y%m%d-%H%M%S)"
+        echo " Creating backup → $BACKUP_FILE"
+        cp -v "$PROXMOXLIB_JS" "$BACKUP_FILE"
+        echo " Applying patch..."
         sed -i 's/if (res === null || res === undefined || !res || res/if (false || res === null || res === undefined || !res || res/' "$PROXMOXLIB_JS"
-        print_success "Nag removed"
+        echo " Patch applied."
     fi
 fi
+
 echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5. Update & upgrade
+# 3. System update & upgrade
 # ──────────────────────────────────────────────────────────────────────────────
+echo "┌─────────────────────────────┐"
+echo "│ 3. System Update & Upgrade  │"
+echo "└─────────────────────────────┘"
+echo ""
+sleep 1
 
-print_step "Updating package lists"
-if ! apt update; then
-    print_warning "apt update had warnings/errors – check output"
-else
-    print_success "Package lists updated"
-fi
-
-print_step "Upgrading system"
+echo " Updating package lists..."
+apt update -qq
+echo ""
+echo " Performing full upgrade..."
 apt full-upgrade -y
-print_success "Upgrade completed"
+echo ""
 
 REBOOT_NEEDED=0
-[[ -f /var/run/reboot-required ]] && REBOOT_NEEDED=1
-[[ $REBOOT_NEEDED -eq 1 ]] && print_warning "Reboot recommended"
+if [[ -f /var/run/reboot-required ]]; then
+    REBOOT_NEEDED=1
+    echo " → Reboot recommended after upgrade."
+fi
+
 echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. SSH hardening – ONLY if keys were successfully added/confirmed
+# 4. Add SSH public keys
 # ──────────────────────────────────────────────────────────────────────────────
+echo "┌─────────────────────────────┐"
+echo "│ 4. Adding SSH Public Keys   │"
+echo "└─────────────────────────────┘"
+echo ""
+sleep 1
 
-print_step "SSH hardening (disable password login)"
+mkdir -p "$SSH_DIR"
+chmod 700 "$SSH_DIR"
 
-if [[ $SSH_KEYS_ADDED_SUCCESSFULLY -eq 1 ]]; then
-    echo "  WARNING: This will disable password authentication."
-    echo "           Make sure key-based login works before confirming!"
+added_count=0
+for key in "${PUBLIC_KEYS[@]}"; do
+    [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+    if ! grep -qF -- "$key" "$AUTHORIZED_KEYS" 2>/dev/null; then
+        echo "$key" >> "$AUTHORIZED_KEYS"
+        echo " Added: ${key:0:50}..."
+        ((added_count++))
+    else
+        echo " Already present: ${key:0:50}..."
+    fi
+done
+
+if [[ $added_count -eq 0 ]]; then
+    echo " All keys were already present."
+else
+    echo " → $added_count new key(s) added."
+fi
+
+chmod 600 "$AUTHORIZED_KEYS"
+chown root:root "$SSH_DIR" "$AUTHORIZED_KEYS"
+
+# Check if we have at least one valid SSH key now
+SSH_KEYS_PRESENT=0
+if [[ -f "$AUTHORIZED_KEYS" ]] && [[ -s "$AUTHORIZED_KEYS" ]]; then
+    # Very basic check: file is not empty and contains at least one line starting with ssh-
+    if grep -qE "^ssh-(rsa|ed25519|ecdsa)" "$AUTHORIZED_KEYS"; then
+        SSH_KEYS_PRESENT=1
+        echo " → At least one SSH public key is present in authorized_keys."
+    else
+        echo " Warning: authorized_keys exists but contains no valid SSH public keys."
+    fi
+else
+    echo " Warning: No SSH public keys were added or found."
+fi
+
+echo ""
+sleep 1
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. SSH Hardening – only if keys are present
+# ──────────────────────────────────────────────────────────────────────────────
+echo "┌─────────────────────────────┐"
+echo "│ 5. SSH Hardening            │"
+echo "└─────────────────────────────┘"
+echo ""
+
+SSH_HARDENED=0
+
+if [[ $SSH_KEYS_PRESENT -eq 1 ]]; then
+    echo "WARNING: This will DISABLE password authentication over SSH."
+    echo " You have at least one public key configured — proceeding is safer."
     echo ""
 
-    read -p "  Disable password authentication? (y/N): " -r CONFIRM
+    read -p "Disable password login? (y/N): " -r CONFIRM
     echo ""
 
-    SSH_HARDENED=0
     if [[ "$CONFIRM" =~ ^[Yy]$ ]]; then
-        print_substep "Backing up sshd_config..."
+        echo "→ Hardening SSH..."
         cp -v "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%Y%m%d-%H%M%S)"
 
-        print_substep "Updating SSH configuration..."
         sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CONFIG"
         sed -i 's/^#*PermitEmptyPasswords.*/PermitEmptyPasswords no/' "$SSHD_CONFIG"
         sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_CONFIG"
 
         grep -q "^PasswordAuthentication" "$SSHD_CONFIG" || echo "PasswordAuthentication no" >> "$SSHD_CONFIG"
-        grep -q "^PermitEmptyPasswords"   "$SSHD_CONFIG" || echo "PermitEmptyPasswords no"   >> "$SSHD_CONFIG"
-        grep -q "^PubkeyAuthentication"   "$SSHD_CONFIG" || echo "PubkeyAuthentication yes"  >> "$SSHD_CONFIG"
+        grep -q "^PermitEmptyPasswords" "$SSHD_CONFIG" || echo "PermitEmptyPasswords no" >> "$SSHD_CONFIG"
+        grep -q "^PubkeyAuthentication" "$SSHD_CONFIG" || echo "PubkeyAuthentication yes" >> "$SSHD_CONFIG"
 
-        print_substep "Restarting SSH service..."
+        echo " → Restarting sshd..."
         if systemctl restart sshd; then
-            print_success "SSH restarted – password login disabled"
+            echo " SSH service restarted successfully."
             SSH_HARDENED=1
         else
-            print_error "Failed to restart sshd – check your config!"
+            echo " ERROR: Failed to restart sshd. Check $SSHD_CONFIG manually."
             exit 2
         fi
     else
-        print_skip "Password authentication remains enabled (user choice)"
+        echo "→ SSH hardening skipped by user."
     fi
 else
-    print_warning "Skipping SSH hardening – no keys were added"
+    echo " Skipping SSH hardening — no valid SSH public keys are configured."
+    echo " Password authentication remains enabled to avoid locking yourself out."
+    echo " Add keys manually and re-run this script or harden SSH yourself."
 fi
+
 echo ""
 sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SUMMARY
+# Summary
 # ──────────────────────────────────────────────────────────────────────────────
-
 echo "┌───────────────────────────────┐"
 echo "│           SUMMARY             │"
 echo "└───────────────────────────────┘"
+echo ""
 
-print_success "Aliases added"
-print_success "Enterprise repos disabled"
-print_success "PVE no-subscription repo configured"
-print_success "Subscription nag removed"
-print_success "System upgraded"
-[[ $REBOOT_NEEDED -eq 1 ]] && print_warning "Reboot recommended"
-
-if [[ $SSH_KEYS_ADDED_SUCCESSFULLY -eq 1 ]]; then
-    print_success "SSH keys added/confirmed (${#valid_keys[@]} keys)"
-else
-    print_warning "No new SSH keys added"
-fi
-
-[[ $SSH_HARDENED -eq 1 ]] && print_success "SSH hardened (password auth disabled)"
-[[ $SSH_KEYS_ADDED_SUCCESSFULLY -eq 1 && $SSH_HARDENED -eq 0 ]] && print_skip "SSH hardening skipped by user"
+echo "• Basic tools (lsb-release, curl, nano, vim) checked/installed"
+echo "• Enterprise repo disabled"
+echo "• No-subscription repo enabled"
+echo "• Subscription nag removed"
+echo "• System updated & upgraded"
+[[ $REBOOT_NEEDED -eq 1 ]] && echo " → Reboot recommended"
+echo "• SSH keys processed (${#PUBLIC_KEYS[@]} configured)"
+[[ $SSH_KEYS_PRESENT -eq 1 ]] && echo "• Valid SSH key(s) detected in authorized_keys"
+[[ $SSH_KEYS_PRESENT -eq 0 ]] && echo "• No valid SSH public keys found — hardening skipped"
+[[ $SSH_HARDENED -eq 1 ]] && echo "• SSH hardened (password auth disabled)"
+[[ $SSH_HARDENED -eq 0 && $SSH_KEYS_PRESENT -eq 1 ]] && echo "• SSH hardening skipped by user"
 
 echo ""
-echo "Script finished."
+echo "Done."
 if [[ $REBOOT_NEEDED -eq 1 ]]; then
-    echo "Recommended next step: reboot"
+    echo ""
+    echo "Recommended next step:"
+    echo " sudo reboot"
 fi
 echo ""
 
-sleep 1
-
+sleep 2
 exit 0
