@@ -4,7 +4,7 @@
 # =============================================================================
 # Run as root on a fresh Proxmox VE installation.
 #
-# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/.../proxmox-postinstall.sh)"
+# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-postinstall.sh)"
 # =============================================================================
 
 set -euo pipefail
