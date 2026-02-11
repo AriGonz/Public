@@ -40,28 +40,15 @@ SSHD_CONFIG="/etc/ssh/sshd_config"
 
 echo ""
 echo "${BLUE}┌──────────────────────────────────────────────────────────────┐${RESET}"
-echo "${BLUE}│   Proxmox VE 9.x Post-Install Configuration Script      │${RESET}"
+echo "${BLUE}│   Proxmox VE 9.x Post-Install Configuration Script           │${RESET}"
 echo "${BLUE}└──────────────────────────────────────────────────────────────┘${RESET}"
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 0. Root check & basic tools
+# 0. Root check
 # ──────────────────────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
     print_error "This script must be run as root"
-fi
-
-print_info "Checking/installing basic tools (curl, lsb-release, etc.)..."
-PACKAGES=""
-command -v curl >/dev/null 2>&1 || PACKAGES="$PACKAGES curl"
-command -v lsb_release >/dev/null 2>&1 || PACKAGES="$PACKAGES lsb-release"
-
-if [[ -n "$PACKAGES" ]]; then
-    apt update -qq
-    apt install -y $PACKAGES
-    print_success "Basic tools installed"
-else
-    print_success "All required tools already present"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -113,6 +100,10 @@ else
     print_success "No-subscription repo already configured"
 fi
 
+# Refresh package lists after repo changes
+print_info "Refreshing package lists..."
+apt update -qq
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. Remove subscription nag
 # ──────────────────────────────────────────────────────────────────────────────
@@ -144,18 +135,15 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. System update & upgrade
+# 3. System full upgrade
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "${BLUE}┌─────────────────────────────┐${RESET}"
-echo "${BLUE}│ 3. System Update & Upgrade  │${RESET}"
+echo "${BLUE}│ 3. System Full Upgrade      │${RESET}"
 echo "${BLUE}└─────────────────────────────┘${RESET}"
 echo ""
 
-print_info "Updating package lists..."
-apt update -qq
-
-print_info "Performing full upgrade..."
+print_info "Performing full system upgrade..."
 apt full-upgrade -y
 
 if [[ -f /var/run/reboot-required ]]; then
@@ -244,10 +232,9 @@ echo "${BLUE}┌─────────────────────�
 echo "${BLUE}│           SUMMARY             │${RESET}"
 echo "${BLUE}└───────────────────────────────┘${RESET}"
 echo ""
-print_success "Enterprise repo disabled"
-print_success "No-subscription repo configured"
+print_success "Repositories configured"
 print_success "Subscription nag removal attempted"
-print_success "System fully updated/upgraded"
+print_success "System fully upgraded"
 [[ -f /var/run/reboot-required ]] && print_warning "Reboot recommended"
 print_success "SSH keys processed (${#PUBLIC_KEYS[@]} defined)"
 [[ $SSH_KEYS_PRESENT -eq 1 ]] && print_success "Valid SSH key(s) present"
