@@ -40,7 +40,7 @@ SSHD_CONFIG="/etc/ssh/sshd_config"
 
 echo ""
 echo "${BLUE}┌──────────────────────────────────────────────────────────────┐${RESET}"
-echo "${BLUE}│   Proxmox VE 9.x Post-Install Configuration Script           │${RESET}"
+echo "${BLUE}│   Proxmox VE 9.x Post-Install Configuration Script      │${RESET}"
 echo "${BLUE}└──────────────────────────────────────────────────────────────┘${RESET}"
 echo ""
 
@@ -68,41 +68,57 @@ else
     CODENAME="trixie"
 fi
 
-NOSUB_REPO="deb http://download.proxmox.com/debian/pve $CODENAME pve-no-subscription"
 print_info "Detected codename: $CODENAME"
 
-# Disable enterprise repo (both .list and .sources styles)
+# ── Disable ALL enterprise repositories (pve, ceph, ceph-squid, etc.) ────────
 print_info "Disabling enterprise repositories..."
 
+# Handle classic .list files (just in case)
 find /etc/apt/sources.list /etc/apt/sources.list.d -type f -name "*.list" -print0 2>/dev/null | \
 while IFS= read -r -d '' file; do
-    if grep -q "enterprise.proxmox.com" "$file"; then
-        sed -i '/enterprise.proxmox.com/s/^deb[[:space:]]/#deb /' "$file"
-        print_success "Commented enterprise in $file"
+    if grep -qi "enterprise.proxmox.com" "$file"; then
+        sed -i '/enterprise.proxmox.com/ s/^deb[[:space:]]/#deb /' "$file"
+        print_success "Commented enterprise lines in $file"
     fi
 done
 
+# Handle deb822 .sources files — disable any block containing enterprise
 find /etc/apt/sources.list.d -type f -name "*.sources" -print0 2>/dev/null | \
 while IFS= read -r -d '' file; do
-    if grep -q "enterprise.proxmox.com" "$file"; then
-        sed -i '/URIs:.*enterprise.proxmox.com/{n;s/Enabled: yes/Enabled: no/}' "$file"
-        print_success "Disabled enterprise in deb822 file $file"
+    if grep -qi "enterprise.proxmox.com" "$file"; then
+        # Use awk to safely set Enabled: no in matching blocks
+        awk -v RS= -v ORS='\n\n' '
+            /URIs:.*enterprise\.proxmox\.com/ {
+                gsub(/Enabled: yes/, "Enabled: no")
+                if (!/Enabled:/) { $0 = $0 "\nEnabled: no" }
+            }
+            { print }
+        ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+        print_success "Disabled enterprise entries in $file"
     fi
 done
 
-# Add/update no-subscription repo
-NOSUB_FILE="/etc/apt/sources.list.d/pve-no-subscription.list"
-if [[ ! -f "$NOSUB_FILE" ]] || ! grep -qF "$NOSUB_REPO" "$NOSUB_FILE"; then
-    print_info "Adding no-subscription repository..."
-    echo "$NOSUB_REPO" > "$NOSUB_FILE"
-    print_success "No-subscription repo added"
-else
-    print_success "No-subscription repo already configured"
-fi
+# Remove any leftover conflicting pve-enterprise.list (old style)
+rm -f /etc/apt/sources.list.d/pve-enterprise.list 2>/dev/null
 
-# Refresh package lists after repo changes
+# ── Add clean pve no-subscription repo in deb822 format ──────────────────────
+PVE_SOURCES_FILE="/etc/apt/sources.list.d/pve-no-subscription.sources"
+
+print_info "Configuring pve-no-subscription repository..."
+
+cat > "$PVE_SOURCES_FILE" << EOF
+Types: deb
+URIs: http://download.proxmox.com/debian/pve
+Suites: $CODENAME
+Components: pve-no-subscription
+Signed-By: /usr/share/keyrings/proxmox-archive-keyring.gpg
+EOF
+
+print_success "No-subscription repo configured ($PVE_SOURCES_FILE)"
+
+# ── Refresh package lists ───────────────────────────────────────────────────
 print_info "Refreshing package lists..."
-apt update -qq
+apt update -qq || true
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. Remove subscription nag
