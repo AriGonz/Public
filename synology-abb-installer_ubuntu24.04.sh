@@ -8,6 +8,7 @@
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/synology-abb-installer_ubuntu24.04.sh)"
 # =============================================================================
 
+
 set -euo pipefail
 
 # ──── Colors (if terminal supports them) ─────────────────────────────────────
@@ -41,10 +42,6 @@ success() {
 
 warning() {
     echo -e "${YELLOW}Warning: $1${RESET}"
-}
-
-pause() {
-    sleep 1
 }
 
 # ─── Install Dependencies ────────────────────────────────────────────────────
@@ -112,7 +109,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 success "Version selected: $VERSION"
-pause
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 2. Download ABB Package
@@ -133,7 +130,7 @@ else
     fi
     success "Download complete"
 fi
-pause
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 3. Extract and Install
@@ -160,7 +157,7 @@ if [ $? -ne 0 ]; then
 fi
 
 success "Installation completed"
-pause
+sleep 1
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 4. Clean Up
