@@ -9,6 +9,9 @@
 # =============================================================================
 
 
+
+
+
 set -euo pipefail
 
 # ──── Colors (if terminal supports them) ─────────────────────────────────────
@@ -82,7 +85,7 @@ fi
 print_section "1" "Fetch and Select ABB Version"
 
 echo "Fetching available versions from Synology archive..."
-VERSIONS=$(curl -s --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3" https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
+VERSIONS=$(curl -fs -m 30 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36" https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
 
 if [ -z "$VERSIONS" ]; then
     warning "Failed to fetch versions – check internet connection or URL"
