@@ -60,25 +60,33 @@ pause() {
 }
 
 # ─── Select Sections ─────────────────────────────────────────────────────────
-echo "Please select which sections to run. Default is yes (y) for each."
-echo ""
+# Install whiptail if not present
+if ! command -v whiptail >/dev/null 2>&1; then
+    apt update -qq
+    apt install -y whiptail
+    success "Installed whiptail for interactive selection"
+fi
 
+# Use whiptail checklist to select sections (user selects with spacebar, arrows to navigate, enter to confirm)
+SELECTED=$(whiptail --title "Select Sections to Run" --checklist \
+    "Choose which sections to execute (space to toggle, arrows to move, Enter to confirm)" 20 78 6 \
+    "1" "System Update & Upgrade" ON \
+    "2" "Install Essential Tools" ON \
+    "3" "Harden SSH & Add Authorized Keys" ON \
+    "4" "Set Timezone" ON \
+    "5" "Enable Time Synchronization" ON \
+    "6" "Basic Firewall (ufw)" ON 3>&1 1>&2 2>&3)
+
+exitstatus=$?
+if [ $exitstatus != 0 ]; then
+    echo "Selection canceled. Exiting script."
+    exit 0
+fi
+
+# Convert selected to an associative array for quick check
 declare -A RUN_SECTION
-declare -A SECTION_TITLES
-SECTION_TITLES[1]="System Update & Upgrade"
-SECTION_TITLES[2]="Install Essential Tools"
-SECTION_TITLES[3]="Harden SSH & Add Authorized Keys"
-SECTION_TITLES[4]="Set Timezone"
-SECTION_TITLES[5]="Enable Time Synchronization"
-SECTION_TITLES[6]="Basic Firewall (ufw)"
-
-for i in {1..6}; do
-    title="${SECTION_TITLES[$i]}"
-    read -p "Run $i. $title? (y/n) [y]: " choice
-    choice="${choice:-y}"  # Default to y if empty
-    if [[ "${choice,,}" == "y" ]]; then
-        RUN_SECTION[$i]="yes"
-    fi
+for sec in $SELECTED; do
+    RUN_SECTION[${sec//\"/}]="yes"
 done
 
 # If no sections selected, warn
