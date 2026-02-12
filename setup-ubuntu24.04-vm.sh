@@ -8,8 +8,6 @@
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/setup-ubuntu24.04-vm.sh)"
 # =============================================================================
 
-
-
 set -euo pipefail
 
 # ──── Colors (if terminal supports them) ─────────────────────────────────────
@@ -226,12 +224,18 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 # Finish
 # ──────────────────────────────────────────────────────────────────────────────
+VM_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '^127\.' | head -1)
+if [[ -z "$VM_IP" ]]; then
+    VM_IP="<vm-ip>"
+    warning "Could not detect VM IP – using placeholder"
+fi
+
 echo ""
 echo "# ──────────────────────────────────────────────────────────────────────────────"
 echo "#               CONFIGURATION COMPLETED SUCCESSFULLY"
 echo "# ──────────────────────────────────────────────────────────────────────────────"
 echo ""
 echo "Next recommended steps:"
-echo "  • Test SSH key login:   ssh $MAIN_USER@<vm-ip>"
+echo "  • Test SSH key login:   ssh $MAIN_USER@$VM_IP"
 echo "  • Reboot if needed:      reboot"
 echo ""
