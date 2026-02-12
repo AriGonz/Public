@@ -9,6 +9,7 @@
 # =============================================================================
 
 
+
 set -euo pipefail
 
 # ──── Colors (if terminal supports them) ─────────────────────────────────────
@@ -59,37 +60,24 @@ pause() {
 }
 
 # ─── Select Sections ─────────────────────────────────────────────────────────
-echo "Please select which sections to run by placing an 'X' in the brackets for yes (e.g., [X]), or leave [ ] for no."
-echo "Copy the following template, edit it in your text editor or mentally, and paste the edited version back here."
-echo "After pasting all lines, press Enter on an empty line to proceed."
+echo "Please select which sections to run. Default is yes (y) for each."
 echo ""
-
-cat << EOF
-1. System Update & Upgrade [ ]
-2. Install Essential Tools [ ]
-3. Harden SSH & Add Authorized Keys [ ]
-4. Set Timezone [ ]
-5. Enable Time Synchronization [ ]
-6. Basic Firewall (ufw) [ ]
-EOF
-
-echo ""
-echo "Paste your edited selections now (end with an empty line):"
 
 declare -A RUN_SECTION
-while read -r line; do
-    if [[ -z "$line" ]]; then
-        break
-    fi
-    # Parse line: expect format like "1. Some title [X]" or "[ ]"
-    if [[ $line =~ ^([1-6])\.[[:space:]]+.*\[[[:space:]]*(X|x)[[:space:]]*\]$ ]]; then
-        section_num="${BASH_REMATCH[1]}"
-        RUN_SECTION[$section_num]="yes"
-    elif [[ $line =~ ^([1-6])\.[[:space:]]+.*\[[[:space:]]*\]$ ]]; then
-        # Explicit [ ] means no, but since we default to no, optional
-        :
-    else
-        warning "Invalid line: $line – skipping"
+declare -A SECTION_TITLES
+SECTION_TITLES[1]="System Update & Upgrade"
+SECTION_TITLES[2]="Install Essential Tools"
+SECTION_TITLES[3]="Harden SSH & Add Authorized Keys"
+SECTION_TITLES[4]="Set Timezone"
+SECTION_TITLES[5]="Enable Time Synchronization"
+SECTION_TITLES[6]="Basic Firewall (ufw)"
+
+for i in {1..6}; do
+    title="${SECTION_TITLES[$i]}"
+    read -p "Run $i. $title? (y/n) [y]: " choice
+    choice="${choice:-y}"  # Default to y if empty
+    if [[ "${choice,,}" == "y" ]]; then
+        RUN_SECTION[$i]="yes"
     fi
 done
 
