@@ -7,7 +7,7 @@
 # Idempotent where possible – safe to re-run
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/synology-abb-installer_ubuntu24.04.sh)"
 # =============================================================================
-
+echo "V1"
 
 
 
