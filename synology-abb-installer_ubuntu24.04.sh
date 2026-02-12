@@ -7,7 +7,9 @@
 # Idempotent where possible – safe to re-run
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/synology-abb-installer_ubuntu24.04.sh)"
 # =============================================================================
-echo "V1"
+echo "V2"
+
+
 
 
 
@@ -32,7 +34,6 @@ print_section() {
     local number="$1"
     local title="$2"
     echo ""
-    echo "V1"
     echo "# ──────────────────────────────────────────────────────────────────────────────"
     echo "# $number. $title"
     echo "# ──────────────────────────────────────────────────────────────────────────────"
@@ -85,10 +86,28 @@ fi
 print_section "1" "Fetch and Select ABB Version"
 
 echo "Fetching available versions from Synology archive..."
-VERSIONS=$(wget -4 --quiet --output-document=- --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36" --timeout=30 https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
+
+URL="https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent"
+USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+
+# Try curl first
+HTML=$(curl -4 -fs -m 30 --user-agent "$USER_AGENT" "$URL" 2>/dev/null) || true
+
+# If curl failed or empty, try wget
+if [ -z "$HTML" ]; then
+    HTML=$(wget -4 --quiet --output-document=- --user-agent="$USER_AGENT" --timeout=30 "$URL" 2>/dev/null) || true
+fi
+
+# If still empty, notify and exit
+if [ -z "$HTML" ]; then
+    warning "Failed to fetch versions using both curl and wget. Please check your internet connection, firewall settings, DNS resolution, or try again later."
+    exit 1
+fi
+
+VERSIONS=$(echo "$HTML" | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
 
 if [ -z "$VERSIONS" ]; then
-    warning "Failed to fetch versions – check internet connection or URL"
+    warning "No versions found in the fetched content – the page format may have changed or access is restricted."
     exit 1
 fi
 
@@ -120,15 +139,20 @@ sleep 1
 print_section "2" "Download ABB Package"
 
 FILE_NAME="Synology Active Backup for Business Agent-${VERSION}-x64-deb.zip"
-URL="https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent/${VERSION}/${FILE_NAME// /%20}"
+DL_URL="https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent/${VERSION}/${FILE_NAME// /%20}"
 
 if [[ -f "$FILE_NAME" ]]; then
     success "File already exists – skipping download"
 else
-    echo "Downloading ${FILE_NAME} from ${URL}..."
-    wget -4 -O "${FILE_NAME}" "${URL}"
-    if [ $? -ne 0 ]; then
-        warning "Failed to download the file. Please check the version and try again."
+    echo "Downloading ${FILE_NAME} from ${DL_URL}..."
+    # Try wget first for download
+    wget -4 -O "${FILE_NAME}" --user-agent="$USER_AGENT" --timeout=30 "${DL_URL}" 2>/dev/null || true
+    if [ ! -f "$FILE_NAME" ] || [ ! -s "$FILE_NAME" ]; then
+        # If wget failed, try curl
+        curl -4 -fs -m 30 --user-agent "$USER_AGENT" -o "${FILE_NAME}" "${DL_URL}" 2>/dev/null || true
+    fi
+    if [ ! -f "$FILE_NAME" ] || [ ! -s "$FILE_NAME" ]; then
+        warning "Failed to download the file using both wget and curl. Please check the version, internet connection, or try again later."
         exit 1
     fi
     success "Download complete"
