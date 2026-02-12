@@ -7,9 +7,7 @@
 # Idempotent where possible – safe to re-run
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/synology-abb-installer_ubuntu24.04.sh)"
 # =============================================================================
-echo "V2"
-
-
+echo "V3"
 
 
 
@@ -98,16 +96,16 @@ if [ -z "$HTML" ]; then
     HTML=$(wget -4 --quiet --output-document=- --user-agent="$USER_AGENT" --timeout=30 "$URL" 2>/dev/null) || true
 fi
 
-# If still empty, notify and exit
+# If still empty, use hardcoded fallback
 if [ -z "$HTML" ]; then
-    warning "Failed to fetch versions using both curl and wget. Please check your internet connection, firewall settings, DNS resolution, or try again later."
-    exit 1
+    warning "Failed to fetch versions using both curl and wget. Using hardcoded list (may not include the latest versions)."
+    VERSIONS="3.1.0-4967 3.1.0-4960 3.1.0-4957 3.1.0-4948 3.0.0-4638 2.7.1-3235 2.7.0-3221 2.6.3-3101 2.6.2-3081 2.6.1-3052"
+else
+    VERSIONS=$(echo "$HTML" | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
 fi
 
-VERSIONS=$(echo "$HTML" | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
-
 if [ -z "$VERSIONS" ]; then
-    warning "No versions found in the fetched content – the page format may have changed or access is restricted."
+    warning "No versions found – the page format may have changed or access is restricted."
     exit 1
 fi
 
