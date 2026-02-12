@@ -5,7 +5,7 @@
 # Follows strict project standard for Ubuntu 24.04 VMs
 # Main user: itadmin (non-root)
 # Idempotent – safe to re-run
-# Usage: bash -c "$(curl -fsSL <your-script-url>)"
+# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/setup-ubuntu24.04-vm.sh)"
 # =============================================================================
 
 set -euo pipefail
