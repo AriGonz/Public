@@ -8,6 +8,8 @@
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/synology-abb-installer_ubuntu24.04.sh)"
 # =============================================================================
 
+
+
 set -euo pipefail
 
 # ──── Colors (if terminal supports them) ─────────────────────────────────────
@@ -22,7 +24,7 @@ else
 fi
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-DEFAULT_VERSION=""  # No default – user must input
+DEFAULT_VERSION=""  # No default – user must select
 
 # ─── Helper Functions ────────────────────────────────────────────────────────
 print_section() {
@@ -55,16 +57,36 @@ if ! command -v whiptail >/dev/null 2>&1; then
     success "Installed whiptail for interactive input"
 fi
 
+# Install curl if not present
+if ! command -v curl >/dev/null 2>&1; then
+    apt update -qq
+    apt install -y curl
+    success "Installed curl for fetching versions"
+fi
+
 # No multi-section selection – single-purpose script
 # Proceed directly
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1. Get ABB Version Input
+# 1. Fetch and Select ABB Version
 # ──────────────────────────────────────────────────────────────────────────────
-print_section "1" "Get ABB Version Input"
+print_section "1" "Fetch and Select ABB Version"
 
-VERSION=$(whiptail --title "Select Version" --inputbox \
-    "Enter the version of Synology Active Backup for Business Agent (e.g., 3.1.0-4967):" 10 60 3>&1 1>&2 2>&3)
+echo "Fetching available versions from Synology archive..."
+VERSIONS=$(curl -s https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | sort -Vr | head -n 10)
+
+if [ -z "$VERSIONS" ]; then
+    warning "Failed to fetch versions – check internet connection or URL"
+    exit 1
+fi
+
+# Build choices for whiptail menu
+CHOICES=()
+for v in $VERSIONS; do
+    CHOICES+=("$v" "$v")
+done
+
+VERSION=$(whiptail --title "Select Version" --menu "Choose a version of Synology Active Backup for Business Agent:" 20 60 10 "${CHOICES[@]}" 3>&1 1>&2 2>&3)
 
 exitstatus=$?
 if [ $exitstatus != 0 ]; then
@@ -73,7 +95,7 @@ if [ $exitstatus != 0 ]; then
 fi
 
 if [ -z "$VERSION" ]; then
-    warning "No version entered – exiting"
+    warning "No version selected – exiting"
     exit 1
 fi
 
