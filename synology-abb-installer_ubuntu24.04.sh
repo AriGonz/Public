@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Synology Active Backup for Business Installer – Ubuntu 24.04
+# =============================================================================
+# Installs Synology ABB Agent on Ubuntu 24.04
+# Main features: User inputs version via whiptail, downloads & installs
+# Idempotent where possible – safe to re-run
+# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/synology-abb-installer_ubuntu24.04.sh)"
+# =============================================================================
+
+set -euo pipefail
+
+# ──── Colors (if terminal supports them) ─────────────────────────────────────
+if [[ -t 1 ]]; then
+    RED=$(tput setaf 1)
+    GREEN=$(tput setaf 2)
+    YELLOW=$(tput setaf 3)
+    BLUE=$(tput setaf 4)
+    RESET=$(tput sgr0)
+else
+    RED="" GREEN="" YELLOW="" BLUE="" RESET=""
+fi
+
+# ─── Configuration ───────────────────────────────────────────────────────────
+DEFAULT_VERSION=""  # No default – user must input
+
+# ─── Helper Functions ────────────────────────────────────────────────────────
+print_section() {
+    local number="$1"
+    local title="$2"
+    echo ""
+    echo "# ──────────────────────────────────────────────────────────────────────────────"
+    echo "# $number. $title"
+    echo "# ──────────────────────────────────────────────────────────────────────────────"
+    echo ""
+}
+
+success() {
+    echo -e "${GREEN}→ $1${RESET}"
+}
+
+warning() {
+    echo -e "${YELLOW}Warning: $1${RESET}"
+}
+
+pause() {
+    sleep 1
+}
+
+# ─── Select Sections ─────────────────────────────────────────────────────────
+# Install whiptail if not present (moved here for early check)
+if ! command -v whiptail >/dev/null 2>&1; then
+    apt update -qq
+    apt install -y whiptail
+    success "Installed whiptail for interactive input"
+fi
+
+# No multi-section selection – single-purpose script
+# Proceed directly
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. Get ABB Version Input
+# ──────────────────────────────────────────────────────────────────────────────
+print_section "1" "Get ABB Version Input"
+
+VERSION=$(whiptail --title "Select Version" --inputbox \
+    "Enter the version of Synology Active Backup for Business Agent (e.g., 3.1.0-4967):" 10 60 3>&1 1>&2 2>&3)
+
+exitstatus=$?
+if [ $exitstatus != 0 ]; then
+    echo "Installation cancelled."
+    exit 1
+fi
+
+if [ -z "$VERSION" ]; then
+    warning "No version entered – exiting"
+    exit 1
+fi
+
+success "Version selected: $VERSION"
+pause
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. Download ABB Package
+# ──────────────────────────────────────────────────────────────────────────────
+print_section "2" "Download ABB Package"
+
+FILE_NAME="Synology Active Backup for Business Agent-${VERSION}-x64-deb.zip"
+URL="https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent/${VERSION}/${FILE_NAME// /%20}"
+
+if [[ -f "$FILE_NAME" ]]; then
+    success "File already exists – skipping download"
+else
+    echo "Downloading ${FILE_NAME} from ${URL}..."
+    wget -O "${FILE_NAME}" "${URL}"
+    if [ $? -ne 0 ]; then
+        warning "Failed to download the file. Please check the version and try again."
+        exit 1
+    fi
+    success "Download complete"
+fi
+pause
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. Extract and Install
+# ──────────────────────────────────────────────────────────────────────────────
+print_section "3" "Extract and Install"
+
+if [[ -f "install.run" ]]; then
+    success "Extracted files exist – skipping unzip"
+else
+    echo "Unzipping ${FILE_NAME}..."
+    unzip "${FILE_NAME}"
+    if [ $? -ne 0 ]; then
+        warning "Failed to unzip the file."
+        exit 1
+    fi
+    success "Unzip complete"
+fi
+
+echo "Installing the agent..."
+sudo ./install.run
+if [ $? -ne 0 ]; then
+    warning "Installation failed."
+    exit 1
+fi
+
+success "Installation completed"
+pause
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. Clean Up
+# ──────────────────────────────────────────────────────────────────────────────
+print_section "4" "Clean Up"
+
+rm -f "${FILE_NAME}" install.run README.txt
+success "Cleaned up temporary files"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Finish
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "# ──────────────────────────────────────────────────────────────────────────────"
+echo "# Installation Complete"
+echo "# ──────────────────────────────────────────────────────────────────────────────"
+echo ""
+echo "Synology Active Backup for Business Agent v$VERSION installed successfully."
