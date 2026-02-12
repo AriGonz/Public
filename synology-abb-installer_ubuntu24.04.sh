@@ -10,8 +10,6 @@
 
 
 
-
-
 set -euo pipefail
 
 # ──── Colors (if terminal supports them) ─────────────────────────────────────
@@ -85,7 +83,7 @@ fi
 print_section "1" "Fetch and Select ABB Version"
 
 echo "Fetching available versions from Synology archive..."
-VERSIONS=$(curl -fs -m 30 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36" https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
+VERSIONS=$(curl -4 -fs -m 30 --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36" https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
 
 if [ -z "$VERSIONS" ]; then
     warning "Failed to fetch versions – check internet connection or URL"
@@ -126,7 +124,7 @@ if [[ -f "$FILE_NAME" ]]; then
     success "File already exists – skipping download"
 else
     echo "Downloading ${FILE_NAME} from ${URL}..."
-    wget -O "${FILE_NAME}" "${URL}"
+    wget -4 -O "${FILE_NAME}" "${URL}"
     if [ $? -ne 0 ]; then
         warning "Failed to download the file. Please check the version and try again."
         exit 1
