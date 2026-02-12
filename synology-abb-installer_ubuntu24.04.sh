@@ -3,12 +3,10 @@
 # Synology Active Backup for Business Installer – Ubuntu 24.04
 # =============================================================================
 # Installs Synology ABB Agent on Ubuntu 24.04
-# Main features: User inputs version via whiptail, downloads & installs
+# Main features: Dynamically fetches top 10 versions, user selects via whiptail, downloads & installs
 # Idempotent where possible – safe to re-run
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/synology-abb-installer_ubuntu24.04.sh)"
 # =============================================================================
-
-
 
 set -euo pipefail
 
@@ -49,8 +47,8 @@ pause() {
     sleep 1
 }
 
-# ─── Select Sections ─────────────────────────────────────────────────────────
-# Install whiptail if not present (moved here for early check)
+# ─── Install Dependencies ────────────────────────────────────────────────────
+# Install whiptail if not present
 if ! command -v whiptail >/dev/null 2>&1; then
     apt update -qq
     apt install -y whiptail
@@ -64,6 +62,20 @@ if ! command -v curl >/dev/null 2>&1; then
     success "Installed curl for fetching versions"
 fi
 
+# Install wget if not present
+if ! command -v wget >/dev/null 2>&1; then
+    apt update -qq
+    apt install -y wget
+    success "Installed wget for downloading packages"
+fi
+
+# Install unzip if not present
+if ! command -v unzip >/dev/null 2>&1; then
+    apt update -qq
+    apt install -y unzip
+    success "Installed unzip for extracting packages"
+fi
+
 # No multi-section selection – single-purpose script
 # Proceed directly
 
@@ -73,7 +85,7 @@ fi
 print_section "1" "Fetch and Select ABB Version"
 
 echo "Fetching available versions from Synology archive..."
-VERSIONS=$(curl -s https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | sort -Vr | head -n 10)
+VERSIONS=$(curl -s --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3" https://archive.synology.com/download/Utility/ActiveBackupBusinessAgent | grep -o 'href="[^/]\+/"' | sed 's/href="//;s/\/"//' | grep -E '^\d+\.\d+\.\d+-\d+$' | sort -Vr | head -n 10)
 
 if [ -z "$VERSIONS" ]; then
     warning "Failed to fetch versions – check internet connection or URL"
