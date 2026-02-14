@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version 0.03
+# Version 0.04
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/check-proxmox-travel.sh)"
 #
 # check-proxmox-travel.sh
@@ -7,6 +7,13 @@
 # Writes output to ./check-proxmox-travel.json by default
 
 set -euo pipefail
+
+# Install jq if not present
+if ! command -v jq &> /dev/null; then
+    echo "jq not found, attempting to install..." >&2
+    apt update -y &> /dev/null
+    apt install -y jq &> /dev/null || { echo "Failed to install jq. Please install manually." >&2; exit 1; }
+fi
 
 DEFAULT_OUTPUT="check-proxmox-travel.json"
 OUTPUT_FILE="${1:-$DEFAULT_OUTPUT}"
@@ -18,7 +25,7 @@ safe_jq() { jq "$@" 2>/dev/null || echo "${2:-null}"; }
 # Data collection functions
 # ──────────────────────────────────────────────────────────────────────────────
 
-get_version() { echo "0.03"; }
+get_version() { echo "0.04"; }
 
 get_proxmox_version() {
     pveversion 2>/dev/null | grep -oP 'pve-manager/\K[\d.]+' || echo "unknown"
@@ -88,7 +95,7 @@ check_opnsense() {
     echo "{\"iso_present\":$((iso_count > 0)), \"vm_exists\":$((vm_count > 0))}"
 }
 
-# Readiness assessment (fixed JSON construction)
+# Readiness assessment
 assess_readiness() {
     local pv=$(get_proxmox_version)
     local ram=$(get_ram_gb)
@@ -97,42 +104,35 @@ assess_readiness() {
     local nics=$(get_nics | jq length 2>/dev/null || echo 0)
     local bridges=$(get_bridges | jq length 2>/dev/null || echo 0)
     local cores=$(get_cpu_cores)
-    local iommu=$(get_iommu_status)
-    local virt=$(get_virt_support)
 
-    local version_ok=$([[ "$pv" > "9.0" ]] && echo true || echo false)
-    local ram_ok=$((ram >= 16 ? 1 : 0))
-    local storage_ok=$((storage >= 128 ? 1 : 0))
-    local avail_ok=$((avail >= 50 ? 1 : 0))
-    local nics_ok=$((nics >= 2 ? 1 : 0))
-    local cores_ok=$((cores >= 4 ? 1 : 0))
-    local iommu_ok=$([[ "$iommu" == "true" ]] && echo 1 || echo 0)
-    local virt_ok=$([[ "$virt" == "true" ]] && echo 1 || echo 0)
-
-    local checks_json=$(jq -n \
-        --argjson version_ok $version_ok \
-        --argjson ram_ok $ram_ok \
-        --argjson storage_ok $storage_ok \
-        --argjson avail_storage_ok $avail_ok \
-        --argjson nics_ok $nics_ok \
-        --argjson cores_ok $cores_ok \
-        --argjson iommu_ok $iommu_ok \
-        --argjson virt_ok $virt_ok \
-        '{version_ok: $version_ok, ram_ok: $ram_ok, storage_ok: $storage_ok, avail_storage_ok: $avail_storage_ok, nics_ok: $nics_ok, cores_ok: $cores_ok, iommu_ok: $iommu_ok, virt_ok: $virt_ok}' || echo "{}")
+    local version_ok
+    if [[ "$pv" > "9.0" ]]; then version_ok=true; else version_ok=false; fi
+    local ram_ok
+    if (( ram >= 16 )); then ram_ok=true; else ram_ok=false; fi
+    local storage_ok
+    if (( storage >= 128 )); then storage_ok=true; else storage_ok=false; fi
+    local avail_ok
+    if (( avail >= 50 )); then avail_ok=true; else avail_ok=false; fi
+    local nics_ok
+    if (( nics >= 2 )); then nics_ok=true; else nics_ok=false; fi
+    local cores_ok
+    if (( cores >= 4 )); then cores_ok=true; else cores_ok=false; fi
+    local iommu_ok=$(get_iommu_status)
+    local virt_ok=$(get_virt_support)
 
     local missing=()
     [[ "$version_ok" == "true" ]] || missing+=("Proxmox >= 9.1 recommended")
-    [[ "$ram_ok" -eq 1 ]] || missing+=("RAM >= 16 GB")
-    [[ "$storage_ok" -eq 1 ]] || missing+=("Root disk >= 128 GB")
-    [[ "$avail_ok" -eq 1 ]] || missing+=("At least 50 GB free space recommended")
-    [[ "$nics_ok" -eq 1 ]] || missing+=("At least 2 Ethernet NICs")
-    [[ "$cores_ok" -eq 1 ]] || missing+=("At least 4 CPU cores recommended")
-    [[ "$iommu_ok" -eq 1 ]] || missing+=("IOMMU not enabled/detected — passthrough may not work")
-    [[ "$virt_ok" -eq 1 ]] || missing+=("CPU virtualization extensions not detected")
+    [[ "$ram_ok" == "true" ]] || missing+=("RAM >= 16 GB")
+    [[ "$storage_ok" == "true" ]] || missing+=("Root disk >= 128 GB")
+    [[ "$avail_ok" == "true" ]] || missing+=("At least 50 GB free space recommended")
+    [[ "$nics_ok" == "true" ]] || missing+=("At least 2 Ethernet NICs")
+    [[ "$cores_ok" == "true" ]] || missing+=("At least 4 CPU cores recommended")
+    [[ "$iommu_ok" == "true" ]] || missing+=("IOMMU not enabled/detected — passthrough may not work")
+    [[ "$virt_ok" == "true" ]] || missing+=("CPU virtualization extensions not detected")
 
     local missing_json=$(printf '%s\n' "${missing[@]}" | safe_jq -R . -s . || echo "[]")
 
-    jq -n --argjson checks "$checks_json" --argjson missing "$missing_json" '{checks: $checks, missing: $missing}'
+    echo "{\"version_ok\": $version_ok, \"ram_ok\": $ram_ok, \"storage_ok\": $storage_ok, \"avail_storage_ok\": $avail_ok, \"nics_ok\": $nics_ok, \"cores_ok\": $cores_ok, \"iommu_ok\": $iommu_ok, \"virt_ok\": $virt_ok, \"missing\":$missing_json}"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -140,25 +140,23 @@ assess_readiness() {
 # ──────────────────────────────────────────────────────────────────────────────
 
 {
-    cat <<EOF
-{
-  "script_version": "$(get_version)",
-  "proxmox_version": "$(get_proxmox_version)",
-  "cpu_model": "$(get_cpu_model)",
-  "cpu_cores": $(get_cpu_cores),
-  "cpu_threads_per_core": $(get_cpu_threads),
-  "ram_gb": $(get_ram_gb),
-  "root_storage_gb": $(get_root_storage_gb),
-  "available_storage_gb": $(get_available_storage_gb),
-  "nics": $(get_nics),
-  "nic_details": $(get_nic_details),
-  "bridges": $(get_bridges),
-  "iommu_enabled": $(get_iommu_status),
-  "virtualization_supported": $(get_virt_support),
-  "opnsense": $(check_opnsense),
-  "readiness": $(assess_readiness)
-}
-EOF
+    echo "{"
+    echo "\"script_version\": \"$(get_version)\","
+    echo "\"proxmox_version\": \"$(get_proxmox_version)\","
+    echo "\"cpu_model\": \"$(get_cpu_model)\","
+    echo "\"cpu_cores\": $(get_cpu_cores),"
+    echo "\"cpu_threads_per_core\": $(get_cpu_threads),"
+    echo "\"ram_gb\": $(get_ram_gb),"
+    echo "\"root_storage_gb\": $(get_root_storage_gb),"
+    echo "\"available_storage_gb\": $(get_available_storage_gb),"
+    echo "\"nics\": $(get_nics),"
+    echo "\"nic_details\": $(get_nic_details),"
+    echo "\"bridges\": $(get_bridges),"
+    echo "\"iommu_enabled\": $(get_iommu_status),"
+    echo "\"virtualization_supported\": $(get_virt_support),"
+    echo "\"opnsense\": $(check_opnsense),"
+    echo "\"readiness\": $(assess_readiness)"
+    echo "}"
 } | jq . > "$OUTPUT_FILE" 2>/dev/null || {
     echo "Error: JSON generation failed. Run with bash -x for debug." >&2
     exit 1
