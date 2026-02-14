@@ -98,33 +98,26 @@ assess_readiness() {
     local bridges=$(get_bridges | jq length 2>/dev/null || echo 0)
     local cores=$(get_cpu_cores)
 
-    local checks=(
-        "version_ok":$([[ "$pv" > "9.0" ]] && echo true || echo false)
-        "ram_ok":$((ram >= 16 ? true : false))
-        "storage_ok":$((storage >= 128 ? true : false))
-        "avail_storage_ok":$((avail >= 50 ? true : false))   # at least 50GB free recommended
-        "nics_ok":$((nics >= 2 ? true : false))
-        "cores_ok":$((cores >= 4 ? true : false))
-        "iommu_ok":$(get_iommu_status)
-        "virt_ok":$(get_virt_support)
-    )
+    local ram_ok=$( ((ram >= 16)) && echo true || echo false )
+    local storage_ok=$( ((storage >= 128)) && echo true || echo false )
+    local avail_ok=$( ((avail >= 50)) && echo true || echo false )  # Recommended free for VMs
+    local nics_ok=$( ((nics >= 2)) && echo true || echo false )
+    local version_ok=$( [[ "$pv" > "9.0" ]] && echo true || echo false )
+    local cores_ok=$( ((cores >= 4)) && echo true || echo false )
+    local iommu_ok=$(get_iommu_status)
+    local virt_ok=$(get_virt_support)
 
     local missing=()
-    [[ "${checks[version_ok]}" != "true" ]] && missing+=("Proxmox >= 9.1 recommended")
-    [[ "${checks[ram_ok]}" != "true" ]] && missing+=("RAM >= 16 GB")
-    [[ "${checks[storage_ok]}" != "true" ]] && missing+=("Root disk >= 128 GB")
-    [[ "${checks[avail_storage_ok]}" != "true" ]] && missing+=("At least 50 GB free space recommended")
-    [[ "${checks[nics_ok]}" != "true" ]] && missing+=("At least 2 Ethernet NICs")
-    [[ "${checks[cores_ok]}" != "true" ]] && missing+=("At least 4 CPU cores recommended")
-    [[ "${checks[iommu_ok]}" != "true" ]] && missing+=("IOMMU not enabled/detected — passthrough may not work")
-    [[ "${checks[virt_ok]}" != "true" ]] && missing+=("CPU virtualization extensions not detected")
+    $version_ok || missing+=("Update Proxmox (>=9.1)")
+    $ram_ok || missing+=("RAM upgrade (>=16 GB)")
+    $storage_ok || missing+=("Storage upgrade (>=128 GB root)")
+    $avail_ok || missing+=("Free up storage (>=50 GB available)")
+    $nics_ok || missing+=("Add NIC (>=2 Ethernet)")
+    $cores_ok || missing+=("CPU upgrade (>=4 cores recommended)")
+    [[ "$iommu_ok" == "true" ]] || missing+=("Enable IOMMU in BIOS for passthrough")
+    [[ "$virt_ok" == "true" ]] || missing+=("Enable virtualization in BIOS")
 
-    local missing_json=$(printf '%s\n' "${missing[@]}" | safe_jq -R . -s . || echo "[]")
-
-    jq -n \
-        --argjson checks "$(printf '%s\n' "${checks[@]}")" \
-        --argjson missing "$missing_json" \
-        '{checks: $checks, missing: $missing}'
+    echo "{\"ram_ok\":$ram_ok, \"storage_ok\":$storage_ok, \"avail_storage_ok\":$avail_ok, \"nics_ok\":$nics_ok, \"version_ok\":$version_ok, \"cores_ok\":$cores_ok, \"iommu_ok\":$iommu_ok, \"virt_ok\":$virt_ok, \"missing\":$(printf '%s\n' "${missing[@]}" | safe_jq -R . -s .)}"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -132,25 +125,23 @@ assess_readiness() {
 # ──────────────────────────────────────────────────────────────────────────────
 
 {
-    cat <<EOF
-{
-  "script_version": "$(get_version)",
-  "proxmox_version": "$(get_proxmox_version)",
-  "cpu_model": "$(get_cpu_model)",
-  "cpu_cores": $(get_cpu_cores),
-  "cpu_threads_per_core": $(get_cpu_threads),
-  "ram_gb": $(get_ram_gb),
-  "root_storage_gb": $(get_root_storage_gb),
-  "available_storage_gb": $(get_available_storage_gb),
-  "nics": $(get_nics),
-  "nic_details": $(get_nic_details),
-  "bridges": $(get_bridges),
-  "iommu_enabled": $(get_iommu_status),
-  "virtualization_supported": $(get_virt_support),
-  "opnsense": $(check_opnsense),
-  "readiness": $(assess_readiness)
-}
-EOF
+    echo "{"
+    echo "\"script_version\": \"$(get_version)\","
+    echo "\"proxmox_version\": \"$(get_proxmox_version)\","
+    echo "\"cpu_model\": \"$(get_cpu_model)\","
+    echo "\"cpu_cores\": $(get_cpu_cores),"
+    echo "\"cpu_threads_per_core\": $(get_cpu_threads),"
+    echo "\"ram_gb\": $(get_ram_gb),"
+    echo "\"root_storage_gb\": $(get_root_storage_gb),"
+    echo "\"available_storage_gb\": $(get_available_storage_gb),"
+    echo "\"nics\": $(get_nics),"
+    echo "\"nic_details\": $(get_nic_details),"
+    echo "\"bridges\": $(get_bridges),"
+    echo "\"iommu_enabled\": $(get_iommu_status),"
+    echo "\"virtualization_supported\": $(get_virt_support),"
+    echo "\"opnsense\": $(check_opnsense),"
+    echo "\"readiness\": $(assess_readiness)"
+    echo "}"
 } | jq . > "$OUTPUT_FILE" 2>/dev/null || {
     echo "Error: JSON generation failed. Run with bash -x for debug." >&2
     exit 1
