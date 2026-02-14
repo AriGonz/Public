@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Version 0.04
+# Version 0.05
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/check-proxmox-travel.sh)"
 #
 # check-proxmox-travel.sh
@@ -8,11 +8,15 @@
 
 set -euo pipefail
 
-# Install jq if not present
+# Install jq if not present, handling Proxmox repo issues
 if ! command -v jq &> /dev/null; then
     echo "jq not found, attempting to install..." >&2
-    apt update -y &> /dev/null
-    apt install -y jq &> /dev/null || { echo "Failed to install jq. Please install manually." >&2; exit 1; }
+    if ! apt update -y &> /dev/null; then
+        echo "Apt update failed. Adding Proxmox no-subscription repo..." >&2
+        echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-no-subscription.list
+        apt update -y &> /dev/null || { echo "Still failed to update apt. Check internet or repositories manually." >&2; exit 1; }
+    fi
+    apt install -y jq &> /dev/null || { echo "Failed to install jq. Run 'apt update && apt install -y jq' manually." >&2; exit 1; }
 fi
 
 DEFAULT_OUTPUT="check-proxmox-travel.json"
@@ -25,7 +29,7 @@ safe_jq() { jq "$@" 2>/dev/null || echo "${2:-null}"; }
 # Data collection functions
 # ──────────────────────────────────────────────────────────────────────────────
 
-get_version() { echo "0.04"; }
+get_version() { echo "0.05"; }
 
 get_proxmox_version() {
     pveversion 2>/dev/null | grep -oP 'pve-manager/\K[\d.]+' || echo "unknown"
@@ -61,7 +65,12 @@ get_available_storage_gb() {
 }
 
 get_nics() {
-    ip -o link show 2>/dev/null | grep -E 'en|eth' | awk '{print $2}' | sed 's/:$//' | safe_jq -R . -s .
+    local ifaces=$(ip -o link show 2>/dev/null | grep -E 'en|eth' | awk '{print $2}' | sed 's/:$//' )
+    if [[ -n "$ifaces" ]]; then
+        echo "$ifaces" | jq -R . | jq -s .
+    else
+        echo '[]'
+    fi
 }
 
 get_nic_details() {
@@ -78,7 +87,12 @@ get_nic_details() {
 }
 
 get_bridges() {
-    brctl show 2>/dev/null | awk 'NR>1 && $1 ~ /^vmbr/ {print $1}' | safe_jq -R . -s . || echo "[]"
+    local bridges=$(brctl show 2>/dev/null | awk 'NR>1 && $1 ~ /^vmbr/ {print $1}')
+    if [[ -n "$bridges" ]]; then
+        echo "$bridges" | jq -R . | jq -s .
+    else
+        echo '[]'
+    fi
 }
 
 get_iommu_status() {
@@ -92,7 +106,7 @@ get_virt_support() {
 check_opnsense() {
     local iso_count=$(find /var/lib/vz/template/iso -name 'OPNsense*.iso' 2>/dev/null | wc -l || echo 0)
     local vm_count=$(qm list 2>/dev/null | grep -i opnsense | wc -l || echo 0)
-    echo "{\"iso_present\":$((iso_count > 0)), \"vm_exists\":$((vm_count > 0))}"
+    echo "{\"iso_present\": $((iso_count > 0)), \"vm_exists\": $((vm_count > 0))}"
 }
 
 # Readiness assessment
