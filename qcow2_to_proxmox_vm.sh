@@ -2,14 +2,15 @@
 
 # Script Name: import_qcow2_to_proxmox.sh
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/qcow2_to_proxmox_vm.sh)"
+
 # Description: Interactive Bash script to import a QCOW2 disk image into a Proxmox VE node.
 #              Creates a new VM, imports the disk, and configures basic settings.
 # Author: Grok AI (generated)
-# Version: 1.0
-# Compatibility: Proxmox VE 9.x or later
+# Version: 1.1
 # Requirements: Must run as root. Uses whiptail for dialogs (installs if missing).
 # Notes: This script is idempotent where possible (e.g., checks for existing VM ID).
 #        It handles errors gracefully and prompts for confirmation before actions.
+#        Scans /var/lib/vz/template/qcow/ for QCOW2 files and offers selection or manual entry.
 
 # Exit immediately if a command exits with a non-zero status
 set -e
@@ -85,6 +86,24 @@ get_available_storages() {
     echo "${storages[@]}"
 }
 
+# Function to get QCOW2 files from default directory
+get_qcow2_files() {
+    local dir="/var/lib/vz/template/qcow/"
+    local files=()
+    if [[ -d "$dir" ]]; then
+        while IFS= read -r -d '' file; do
+            files+=("$(basename "$file")" "$(basename "$file")")
+        done < <(find "$dir" -maxdepth 1 -type f -name "*.qcow2" -print0)
+    fi
+    if [ ${#files[@]} -eq 0 ]; then
+        whiptail --title "Info" --msgbox "No QCOW2 files found in $dir. Proceeding to manual entry." 8 78
+        echo ""
+    else
+        files+=("manual" "Other (manual entry)")
+        echo "${files[@]}"
+    fi
+}
+
 # Main script execution
 main() {
     check_root
@@ -99,8 +118,28 @@ main() {
     local memory_mb="2048"  # Default suggestion
     local cpu_cores="2"     # Default suggestion
 
-    # Prompt for inputs
-    qcow2_path=$(get_input "Enter the full path to the QCOW2 file:" "")
+    # Prompt for QCOW2 selection
+    local qcow_options
+    qcow_options=($(get_qcow2_files))
+    if [ ${#qcow_options[@]} -gt 0 ]; then
+        local selected_file
+        selected_file=$(get_menu_selection "QCOW2 File Selection" "Select a QCOW2 file or manual entry:" "${qcow_options[@]}")
+        if [[ "$selected_file" == "manual" ]]; then
+            qcow2_path=$(get_input "Enter the full path to the QCOW2 file:" "")
+        else
+            qcow2_path="/var/lib/vz/template/qcow/$selected_file"
+        fi
+    else
+        qcow2_path=$(get_input "Enter the full path to the QCOW2 file:" "")
+    fi
+
+    # Validate the path exists
+    if [[ ! -f "$qcow2_path" ]]; then
+        whiptail --title "Error" --msgbox "File not found: $qcow2_path. Please check the path." 8 78
+        exit 1
+    fi
+
+    # Prompt for other inputs
     vm_name=$(get_input "Enter the VM name:" "")
     vm_id=$(get_input "Enter a unique VM ID (integer):" "")
 
