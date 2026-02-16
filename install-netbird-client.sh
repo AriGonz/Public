@@ -3,7 +3,7 @@
 # NetBird Client Installer (Debian/Ubuntu/Proxmox)
 #
 # Usage (recommended, run as root):
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/<YOU>/<REPO>/main/install-netbird-client.sh)"
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/install-netbird-client.sh)"
 #
 # Examples:
 #   NETBIRD_MANAGEMENT_URL="https://netbird.arigonz.com" bash install-netbird.sh
