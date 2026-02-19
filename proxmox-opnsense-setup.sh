@@ -59,19 +59,11 @@ VM_ID="${INPUT_VMID:-100}"
 read -rp "$(echo -e "${CYAN}WiFi SSID${NC} [${HOSTNAME}]: ")" INPUT_SSID
 WIFI_SSID="${INPUT_SSID:-$HOSTNAME}"
 
-while true; do
-    read -rsp "$(echo -e "${CYAN}WiFi password${NC} (min 8 chars): ")" WIFI_PASS
-    echo
-    [[ ${#WIFI_PASS} -ge 8 ]] && break
-    warn "Password must be at least 8 characters, try again"
-done
-
 echo ""
 echo -e "${BOLD}Configuration Summary:${NC}"
 echo -e "  Hostname     : ${CYAN}${HOSTNAME}${NC}"
 echo -e "  OPNsense VM  : ${CYAN}${VM_ID}${NC}"
 echo -e "  WiFi SSID    : ${CYAN}${WIFI_SSID}${NC}"
-echo -e "  WiFi Pass    : ${CYAN}$(echo "${WIFI_PASS}" | sed 's/./*/g')${NC}"
 echo -e "  LAN IP       : ${CYAN}${LAN_HOST_IP}/${LAN_SUBNET}${NC}"
 echo -e "  OPNsense IP  : ${CYAN}${LAN_GW}${NC}"
 echo ""
@@ -142,7 +134,9 @@ else
 fi
 
 # LVM pool space (need 35GB = 36700160 KB)
-LVM_FREE_KB=$(pvesm status 2>/dev/null | awk '/local-lvm/{print $5}')
+# pvesm status columns: Name Type Status Total Used Available %
+# $6 = Available
+LVM_FREE_KB=$(pvesm status 2>/dev/null | awk '/local-lvm/{print $6}')
 if [[ -n "$LVM_FREE_KB" && "$LVM_FREE_KB" -ge 36700160 ]]; then
     LVM_FREE_GB=$(awk "BEGIN {printf \"%.1f\", ${LVM_FREE_KB}/1048576}")
     pass_check "LVM pool space (${LVM_FREE_GB}GB free, need 35GB)"
@@ -321,6 +315,13 @@ info "Network config written"
 # =============================================================
 if [[ "$SKIP_WIFI" == "false" ]]; then
     step "PHASE 5: WiFi Access Point"
+
+    while true; do
+        read -rsp "$(echo -e "${CYAN}WiFi password for '${WIFI_SSID}'${NC} (min 8 chars): ")" WIFI_PASS
+        echo
+        [[ ${#WIFI_PASS} -ge 8 ]] && break
+        warn "Password must be at least 8 characters, try again"
+    done
 
     info "Installing hostapd"
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q hostapd
