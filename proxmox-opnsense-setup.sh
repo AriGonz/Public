@@ -17,7 +17,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="1.3"
+SCRIPT_VERSION="1.4"
 
 info()    { echo -e "${GREEN}[+]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
@@ -114,13 +114,21 @@ VM_ID="${INPUT_VMID:-100}"
 read -rp "$(echo -e "${CYAN}WiFi SSID${NC} [${HOSTNAME}]: ")" INPUT_SSID
 WIFI_SSID="${INPUT_SSID:-$HOSTNAME}"
 
+while true; do
+    read -rsp "$(echo -e "${CYAN}OPNsense admin password${NC} (min 8 chars): ")" OPNSENSE_PASS
+    echo
+    [[ ${#OPNSENSE_PASS} -ge 8 ]] && break
+    warn "Password must be at least 8 characters, try again"
+done
+
 echo ""
 echo -e "${BOLD}Configuration Summary:${NC}"
-echo -e "  Hostname     : ${CYAN}${HOSTNAME}${NC}"
-echo -e "  OPNsense VM  : ${CYAN}${VM_ID}${NC}"
-echo -e "  WiFi SSID    : ${CYAN}${WIFI_SSID}${NC}"
-echo -e "  LAN IP       : ${CYAN}${LAN_HOST_IP}/${LAN_SUBNET}${NC}"
-echo -e "  OPNsense IP  : ${CYAN}${LAN_GW}${NC}"
+echo -e "  Hostname        : ${CYAN}${HOSTNAME}${NC}"
+echo -e "  OPNsense VM     : ${CYAN}${VM_ID}${NC}"
+echo -e "  WiFi SSID       : ${CYAN}${WIFI_SSID}${NC}"
+echo -e "  OPNsense pass   : ${CYAN}$(echo "${OPNSENSE_PASS}" | sed 's/./*/g')${NC}"
+echo -e "  LAN IP          : ${CYAN}${LAN_HOST_IP}/${LAN_SUBNET}${NC}"
+echo -e "  OPNsense IP     : ${CYAN}${LAN_GW}${NC}"
 echo ""
 read -rp "$(echo -e "${YELLOW}Proceed with setup? [y/N]:${NC} ")" CONFIRM
 [[ "${CONFIRM,,}" == "y" ]] || error "Aborted by user"
@@ -481,15 +489,34 @@ curl -fsSL https://pkgs.netbird.io/install.sh | bash
 
 info "Connecting to Netbird management server..."
 netbird up --management-url "$NETBIRD_MGMT" &
-NETBIRD_PID=$!
-sleep 8
+sleep 5
+
+# Extract and display the auth URL
+NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
 
 echo ""
 echo -e "${YELLOW}${BOLD}━━━ Netbird Authorization Required ━━━${NC}"
-echo -e "Run the following command to get your auth URL:"
-echo -e "  ${CYAN}netbird status${NC}"
-echo -e "Then open the URL shown to authorize this device at:"
-echo -e "  ${CYAN}${NETBIRD_MGMT}${NC}"
+if [[ -n "$NETBIRD_AUTH_URL" ]]; then
+    echo -e "  Open this URL to authorize this device:"
+    echo -e "  ${CYAN}${NETBIRD_AUTH_URL}${NC}"
+else
+    echo -e "  Run ${CYAN}netbird status${NC} to get your authorization URL"
+    echo -e "  Management URL: ${CYAN}${NETBIRD_MGMT}${NC}"
+fi
+echo ""
+
+# Poll until Netbird is connected
+info "Waiting for Netbird authorization..."
+while true; do
+    NETBIRD_STATE=$(netbird status 2>/dev/null | grep -i "Status:" | awk '{print $2}' || true)
+    if [[ "${NETBIRD_STATE,,}" == "connected" ]]; then
+        NETBIRD_IP=$(netbird status 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        success "Netbird connected! Your Netbird IP: ${CYAN}${NETBIRD_IP}${NC}"
+        break
+    fi
+    echo -ne "\r  [~] Netbird status: ${YELLOW}${NETBIRD_STATE:-waiting}${NC} — authorize at the URL above..."
+    sleep 5
+done
 echo ""
 
 # =============================================================
@@ -515,34 +542,196 @@ read -rp "$(echo -e "${RED}${BOLD}Press ENTER to apply network changes (or Ctrl+
     [[ "$SKIP_WIFI" == "false" ]] && systemctl restart hostapd 2>/dev/null) &
 
 # =============================================================
+# PHASE 9 — OPNSENSE CONFIGURATION & PORT FORWARDING
+# =============================================================
+step "PHASE 9: OPNsense Configuration & Port Forwarding"
+
+# Install sshpass for non-interactive SSH into OPNsense
+DEBIAN_FRONTEND=noninteractive apt-get install -y -q sshpass
+
+# Wait for OPNsense SSH to become available
+info "Waiting for OPNsense to boot and become reachable..."
+OPNSENSE_SSH_READY=false
+for i in $(seq 1 60); do
+    if sshpass -p 'opnsense' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 \
+        root@"${LAN_GW}" 'echo ok' &>/dev/null; then
+        OPNSENSE_SSH_READY=true
+        break
+    fi
+    printf "\r  [~] Waiting for OPNsense SSH... (%ds)" "$((i*5))"
+    sleep 5
+done
+echo ""
+
+if [[ "$OPNSENSE_SSH_READY" != "true" ]]; then
+    warn "OPNsense SSH not reachable after 5 minutes — skipping auto-configuration"
+    warn "Complete OPNsense setup manually via Proxmox console → VM ${VM_ID}"
+else
+    success "OPNsense is reachable"
+
+    # Run full OPNsense configuration via PHP over SSH
+    info "Configuring OPNsense interfaces, DHCP, password and port forwarding..."
+    sshpass -p 'opnsense' ssh -o StrictHostKeyChecking=no root@"${LAN_GW}" bash << OPNSENSE_EOF
+php -r "
+require_once('/usr/local/etc/inc/config.inc');
+require_once('/usr/local/etc/inc/util.inc');
+require_once('/usr/local/etc/inc/interfaces.inc');
+require_once('/usr/local/etc/inc/filter.inc');
+
+\\\$config = parse_config();
+
+// ── Interfaces ────────────────────────────────────────────
+\\\$config['interfaces']['wan'] = [
+    'if'     => 'vtnet0',
+    'descr'  => 'WAN',
+    'ipaddr' => 'dhcp',
+    'enable' => true,
+];
+\\\$config['interfaces']['lan'] = [
+    'if'          => 'vtnet1',
+    'descr'       => 'LAN',
+    'ipaddr'      => '192.168.1.1',
+    'subnet'      => '24',
+    'enable'      => true,
+];
+
+// ── DHCP Server ───────────────────────────────────────────
+\\\$config['dhcpd']['lan'] = [
+    'enable' => true,
+    'range'  => ['from' => '192.168.1.100', 'to' => '192.168.1.200'],
+];
+
+// ── Admin Password ────────────────────────────────────────
+foreach (\\\$config['system']['user'] as &\\\$user) {
+    if (\\\$user['name'] === 'root' || \\\$user['name'] === 'admin') {
+        \\\$user['password'] = crypt('${OPNSENSE_PASS}', '\\\$6\\\$' . bin2hex(random_bytes(16)) . '\\\$');
+    }
+}
+unset(\\\$user);
+
+// ── Generate API Key ──────────────────────────────────────
+\\\$apiKey    = bin2hex(random_bytes(32));
+\\\$apiSecret = bin2hex(random_bytes(32));
+\\\$apiHash   = crypt(\\\$apiSecret, '\\\$6\\\$' . bin2hex(random_bytes(16)) . '\\\$');
+foreach (\\\$config['system']['user'] as &\\\$user) {
+    if (\\\$user['name'] === 'root' || \\\$user['name'] === 'admin') {
+        \\\$user['apikeys']['item'] = [
+            'key'    => \\\$apiKey,
+            'secret' => \\\$apiHash,
+        ];
+    }
+}
+unset(\\\$user);
+file_put_contents('/tmp/opnsense_api.txt', \\\$apiKey . ':' . \\\$apiSecret . PHP_EOL);
+
+// ── Port Forwarding (NAT) ─────────────────────────────────
+\\\$nat_rules = [
+    ['descr' => 'Proxmox Web UI',  'dstport' => '8006', 'target' => '192.168.1.254', 'targetport' => '8006'],
+    ['descr' => 'Proxmox SSH',     'dstport' => '22',   'target' => '192.168.1.254', 'targetport' => '22'],
+    ['descr' => 'OPNsense HTTPS',  'dstport' => '443',  'target' => '192.168.1.1',   'targetport' => '443'],
+    ['descr' => 'OPNsense HTTP',   'dstport' => '80',   'target' => '192.168.1.1',   'targetport' => '80'],
+];
+if (!isset(\\\$config['nat']['rule'])) \\\$config['nat']['rule'] = [];
+foreach (\\\$nat_rules as \\\$rule) {
+    \\\$config['nat']['rule'][] = [
+        'interface'      => 'wan',
+        'protocol'       => 'tcp',
+        'source'         => ['any' => true],
+        'destination'    => ['any' => true, 'port' => \\\$rule['dstport']],
+        'target'         => \\\$rule['target'],
+        'local-port'     => \\\$rule['targetport'],
+        'descr'          => \\\$rule['descr'],
+        'associated-rule-id' => 'nat_' . \\\$rule['dstport'],
+    ];
+}
+
+// ── Save & Apply ──────────────────────────────────────────
+write_config('Automated setup by proxmox-opnsense-setup.sh');
+echo 'CONFIG_OK' . PHP_EOL;
+"
+OPNSENSE_EOF
+
+    # Check config was saved
+    if sshpass -p 'opnsense' ssh -o StrictHostKeyChecking=no root@"${LAN_GW}" \
+        'cat /tmp/opnsense_api.txt 2>/dev/null' | grep -q ':'; then
+        success "OPNsense configuration applied"
+
+        # Get API credentials
+        API_CREDS=$(sshpass -p 'opnsense' ssh -o StrictHostKeyChecking=no \
+            root@"${LAN_GW}" 'cat /tmp/opnsense_api.txt && rm /tmp/opnsense_api.txt')
+        API_KEY=$(echo "$API_CREDS" | cut -d: -f1)
+        API_SECRET=$(echo "$API_CREDS" | cut -d: -f2)
+
+        # Reload OPNsense services via API
+        info "Reloading OPNsense services..."
+        curl -sk -u "${API_KEY}:${API_SECRET}" \
+            -X POST "https://${LAN_GW}/api/core/firmware/reboot" &>/dev/null || true
+        sleep 30
+
+        # Get WAN IP after reboot
+        info "Getting OPNsense WAN IP..."
+        WAN_IP=""
+        for i in $(seq 1 12); do
+            WAN_IP=$(sshpass -p "${OPNSENSE_PASS}" ssh -o StrictHostKeyChecking=no \
+                -o ConnectTimeout=5 root@"${LAN_GW}" \
+                "ifconfig vtnet0 2>/dev/null | awk '/inet /{print \$2}'" 2>/dev/null || true)
+            [[ -n "$WAN_IP" ]] && break
+            printf "\r  [~] Waiting for WAN IP... (%ds)" "$((i*5))"
+            sleep 5
+        done
+        echo ""
+
+        if [[ -n "$WAN_IP" ]]; then
+            success "OPNsense WAN IP: ${CYAN}${WAN_IP}${NC}"
+        else
+            warn "Could not detect WAN IP — check OPNsense console"
+            WAN_IP="<WAN_IP>"
+        fi
+    else
+        warn "OPNsense config may not have applied — check manually"
+        WAN_IP="<WAN_IP>"
+    fi
+fi
+
+# =============================================================
+# PHASE 10 — INSTALL GET-WAN-IP SCRIPT
+# =============================================================
+step "PHASE 10: Installing get-wan-ip.sh"
+
+info "Downloading get-wan-ip.sh..."
+curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/get-wan-ip.sh \
+    -o /root/get-wan-ip.sh && chmod +x /root/get-wan-ip.sh
+
+# Update OPNsense password in the script to match what was set
+sed -i "s|OPNSENSE_PASS=.*|OPNSENSE_PASS=\"${OPNSENSE_PASS}\"|" /root/get-wan-ip.sh
+info "OPNsense password updated in get-wan-ip.sh"
+
+# Run it to show current IPs and install the systemd boot service
+info "Running get-wan-ip.sh (installs boot service on first run)..."
+bash /root/get-wan-ip.sh
+
+# =============================================================
 # FINAL OUTPUT
 # =============================================================
 echo ""
 echo -e "${GREEN}${BOLD}╔═══════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║            SETUP COMPLETE — NEXT STEPS               ║${NC}"
+echo -e "${GREEN}${BOLD}║              SETUP COMPLETE                          ║${NC}"
 echo -e "${GREEN}${BOLD}╚═══════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  ${BOLD}Reconnect (after network changes apply in ~5 sec):${NC}"
-echo -e "  • Plug laptop into LAN port (${LAN_NIC})"
-[[ "$SKIP_WIFI" == "false" ]] && \
-echo -e "  • Or connect to WiFi: ${CYAN}${WIFI_SSID}${NC}"
-echo ""
-echo -e "  ${BOLD}Web Interfaces:${NC}"
+echo -e "  ${BOLD}LAN Access (plug into ${LAN_NIC} or WiFi ${WIFI_SSID:-N/A}):${NC}"
 echo -e "  • Proxmox  → ${CYAN}https://${LAN_HOST_IP}:8006${NC}"
-echo -e "  • OPNsense → ${CYAN}https://${LAN_GW}${NC}  (login: admin / opnsense)"
+echo -e "  • OPNsense → ${CYAN}https://${LAN_GW}${NC}"
 echo ""
-echo -e "  ${BOLD}OPNsense First Boot (Proxmox Console → VM ${VM_ID}):${NC}"
-echo -e "  1. Console menu → option 1 → Assign Interfaces"
-echo -e "     WAN = vtnet0   LAN = vtnet1"
-echo -e "  2. Console menu → option 2 → Set LAN IP"
-echo -e "     IP: ${LAN_GW}  Subnet: 24  Enable DHCP: yes"
-echo -e "     DHCP range: 192.168.1.100 – 192.168.1.200"
-echo -e "  3. Open browser → ${CYAN}https://${LAN_GW}${NC}"
-echo -e "     Complete setup wizard"
+echo -e "  ${BOLD}WAN Access (from any upstream network):${NC}"
+echo -e "  • Proxmox  → ${CYAN}https://${WAN_IP:-<WAN_IP>}:8006${NC}"
+echo -e "  • OPNsense → ${CYAN}https://${WAN_IP:-<WAN_IP>}${NC}"
 echo ""
-echo -e "  ${BOLD}Netbird:${NC}"
-echo -e "  • Run ${CYAN}netbird status${NC} to get your authorization URL"
-echo -e "  • Authorize at: ${CYAN}${NETBIRD_MGMT}${NC}"
+echo -e "  ${BOLD}Remote Access (any network, any location):${NC}"
+echo -e "  • Netbird  → ${CYAN}https://${NETBIRD_IP:-<Netbird_IP>}:8006${NC}"
+echo ""
+echo -e "  ${BOLD}Credentials:${NC}"
+echo -e "  • Proxmox login  : root / (your password)"
+echo -e "  • OPNsense login : admin / (password you set)"
 echo ""
 echo -e "${GREEN}${BOLD}  Done! SSH will drop momentarily — reconnect on ${LAN_HOST_IP}${NC}"
 echo ""
