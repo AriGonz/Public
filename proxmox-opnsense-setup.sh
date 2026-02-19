@@ -47,14 +47,18 @@ SKIP_WIFI=false
 # =============================================================
 step "PHASE 0: Repository Setup"
 
-# Disable enterprise repos
+# Disable ALL enterprise repos (any file referencing enterprise.proxmox.com)
 info "Disabling enterprise repos"
-[[ -f /etc/apt/sources.list.d/pve-enterprise.list ]] && \
-    sed -i 's/^deb/#deb/' /etc/apt/sources.list.d/pve-enterprise.list && \
-    info "pve-enterprise repo disabled" || true
-[[ -f /etc/apt/sources.list.d/ceph.list ]] && \
-    sed -i 's/^deb/#deb/' /etc/apt/sources.list.d/ceph.list && \
-    info "Ceph enterprise repo disabled" || true
+while IFS= read -r repo_file; do
+    sed -i 's/^deb/#deb/' "$repo_file"
+    info "Disabled: $(basename "$repo_file")"
+done < <(grep -rl "enterprise.proxmox.com" /etc/apt/sources.list.d/ 2>/dev/null)
+
+# Also catch any in main sources.list
+if grep -q "enterprise.proxmox.com" /etc/apt/sources.list 2>/dev/null; then
+    sed -i 's/.*enterprise\.proxmox\.com.*/#&/' /etc/apt/sources.list
+    info "Disabled enterprise entries in /etc/apt/sources.list"
+fi
 
 # Enable no-subscription repo
 PVE_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
@@ -68,7 +72,9 @@ fi
 
 # Refresh package lists with correct repos
 info "Updating package lists..."
-apt-get update -qq
+apt-get update 2>&1 | grep -E "^(Err|W:|E:)" | while read -r line; do
+    warn "$line"
+done || true
 info "Repositories configured and updated"
 
 # =============================================================
