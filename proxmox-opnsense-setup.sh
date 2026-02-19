@@ -1,8 +1,9 @@
 #!/bin/bash
 # =============================================================
 # Proxmox VE — Portable OPNsense Firewall Setup Script
-# Repo: github.com/AriGonz/Public
-# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/proxmox-opnsense-setup.sh)"
+# Repo   : github.com/AriGonz/Public
+# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/proxmox-opnsense-setup.sh)"
+# Version: 1.3
 # =============================================================
 
 set -euo pipefail
@@ -16,11 +17,20 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+SCRIPT_VERSION="1.3"
+
 info()    { echo -e "${GREEN}[+]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
 error()   { echo -e "${RED}[✗]${NC} $1"; exit 1; }
 step()    { echo -e "\n${BLUE}${BOLD}━━━ $1 ━━━${NC}"; }
 success() { echo -e "${GREEN}[✓]${NC} $1"; }
+
+echo -e "${BLUE}${BOLD}"
+echo -e "  ╔══════════════════════════════════════════════════╗"
+echo -e "  ║   Proxmox OPNsense Setup  •  Version ${SCRIPT_VERSION}        ║"
+echo -e "  ║   github.com/AriGonz/Public                     ║"
+echo -e "  ╚══════════════════════════════════════════════════╝"
+echo -e "${NC}"
 
 # ── Fixed Config ──────────────────────────────────────────────
 OPNSENSE_VER="26.1"
@@ -47,16 +57,26 @@ SKIP_WIFI=false
 # =============================================================
 step "PHASE 0: Repository Setup"
 
-# Disable ALL enterprise repos (any file referencing enterprise.proxmox.com)
+# Disable ALL enterprise repos — handles both .list and .sources (deb822) formats
 info "Disabling enterprise repos"
 while IFS= read -r repo_file; do
-    sed -i 's/^deb/#deb/' "$repo_file"
+    if [[ "$repo_file" == *.sources ]]; then
+        # deb822 format — set Enabled: no
+        if grep -q "^Enabled:" "$repo_file"; then
+            sed -i 's/^Enabled:.*/Enabled: no/' "$repo_file"
+        else
+            echo "Enabled: no" >> "$repo_file"
+        fi
+    else
+        # classic .list format — comment out deb lines
+        sed -i 's/^deb/#deb/' "$repo_file"
+    fi
     info "Disabled: $(basename "$repo_file")"
 done < <(grep -rl "enterprise.proxmox.com" /etc/apt/sources.list.d/ 2>/dev/null)
 
-# Also catch any in main sources.list
+# Also catch any enterprise entries in main sources.list
 if grep -q "enterprise.proxmox.com" /etc/apt/sources.list 2>/dev/null; then
-    sed -i 's/.*enterprise\.proxmox\.com.*/#&/' /etc/apt/sources.list
+    sed -i '/enterprise\.proxmox\.com/s/^deb/#deb/' /etc/apt/sources.list
     info "Disabled enterprise entries in /etc/apt/sources.list"
 fi
 
