@@ -2,8 +2,8 @@
 # =============================================================
 # get-wan-ip.sh — Show current WAN, LAN and Netbird IPs
 # Repo   : github.com/AriGonz/Public
-# Usage  : bash /root/get-wan-ip.sh
-# Version: 1.0
+# Repo   : github.com/AriGonz/Public
+# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/get-wan-ip.sh)"
 # =============================================================
 
 # ── Colors ────────────────────────────────────────────────────
