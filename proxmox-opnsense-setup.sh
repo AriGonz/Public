@@ -2,8 +2,8 @@
 # =============================================================
 # Proxmox VE — Portable OPNsense Firewall Setup Script
 # Repo   : github.com/AriGonz/Public
-# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-opnsense-setup.sh)"
-# Version: 1.3
+# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/proxmox-opnsense-setup.sh)"
+# Version: 1.5
 # =============================================================
 
 set -euo pipefail
@@ -17,7 +17,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="1.4"
+SCRIPT_VERSION="1.5"
 
 info()    { echo -e "${GREEN}[+]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
@@ -508,13 +508,15 @@ echo ""
 # Poll until Netbird is connected
 info "Waiting for Netbird authorization..."
 while true; do
-    NETBIRD_STATE=$(netbird status 2>/dev/null | grep -i "Status:" | awk '{print $2}' || true)
-    if [[ "${NETBIRD_STATE,,}" == "connected" ]]; then
-        NETBIRD_IP=$(netbird status 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+    NETBIRD_FULL=$(netbird status 2>/dev/null || true)
+    if echo "$NETBIRD_FULL" | grep -qi "connected"; then
+        NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        echo ""
         success "Netbird connected! Your Netbird IP: ${CYAN}${NETBIRD_IP}${NC}"
         break
     fi
-    echo -ne "\r  [~] Netbird status: ${YELLOW}${NETBIRD_STATE:-waiting}${NC} — authorize at the URL above..."
+    NETBIRD_STATE=$(echo "$NETBIRD_FULL" | grep -i "status\|state" | head -1 | awk '{print $NF}' || echo "waiting")
+    echo -ne "\r  [~] Netbird status: ${YELLOW}${NETBIRD_STATE:-waiting}${NC} — authorize at the URL above...     "
     sleep 5
 done
 echo ""
