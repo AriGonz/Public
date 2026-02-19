@@ -2,7 +2,7 @@
 # =============================================================
 # Proxmox VE — Portable OPNsense Firewall Setup Script
 # Repo   : github.com/AriGonz/Public
-# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/proxmox-opnsense-setup.sh)"
+# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-opnsense-setup.sh)"
 # Version: 1.3
 # =============================================================
 
