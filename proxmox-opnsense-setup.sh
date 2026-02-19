@@ -43,6 +43,35 @@ ISO_URL="https://pkg.opnsense.org/releases/${OPNSENSE_VER}/${ISO_BZ2}"
 SKIP_WIFI=false
 
 # =============================================================
+# PHASE 0 — REPOSITORY SETUP (runs immediately, no prompts)
+# =============================================================
+step "PHASE 0: Repository Setup"
+
+# Disable enterprise repos
+info "Disabling enterprise repos"
+[[ -f /etc/apt/sources.list.d/pve-enterprise.list ]] && \
+    sed -i 's/^deb/#deb/' /etc/apt/sources.list.d/pve-enterprise.list && \
+    info "pve-enterprise repo disabled" || true
+[[ -f /etc/apt/sources.list.d/ceph.list ]] && \
+    sed -i 's/^deb/#deb/' /etc/apt/sources.list.d/ceph.list && \
+    info "Ceph enterprise repo disabled" || true
+
+# Enable no-subscription repo
+PVE_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
+NO_SUB_REPO="deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription"
+if ! grep -qF "pve-no-subscription" /etc/apt/sources.list 2>/dev/null; then
+    echo "$NO_SUB_REPO" >> /etc/apt/sources.list
+    info "No-subscription repo added"
+else
+    warn "No-subscription repo already present"
+fi
+
+# Refresh package lists with correct repos
+info "Updating package lists..."
+apt-get update -qq
+info "Repositories configured and updated"
+
+# =============================================================
 # PHASE 1 — USER INPUT
 # =============================================================
 step "PHASE 1: Configuration"
@@ -224,24 +253,6 @@ echo "$HOSTNAME" > /etc/hostname
 sed -i "s/127\.0\.1\.1.*/127.0.1.1\t${HOSTNAME}/" /etc/hosts 2>/dev/null || \
     echo "127.0.1.1	${HOSTNAME}" >> /etc/hosts
 
-# Disable enterprise repos
-info "Disabling enterprise repos"
-[[ -f /etc/apt/sources.list.d/pve-enterprise.list ]] && \
-    sed -i 's/^deb/#deb/' /etc/apt/sources.list.d/pve-enterprise.list
-[[ -f /etc/apt/sources.list.d/ceph.list ]] && \
-    sed -i 's/^deb/#deb/' /etc/apt/sources.list.d/ceph.list
-
-# Enable no-subscription repo
-info "Enabling no-subscription repo"
-PVE_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
-NO_SUB_REPO="deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription"
-if ! grep -qF "pve-no-subscription" /etc/apt/sources.list 2>/dev/null; then
-    echo "$NO_SUB_REPO" >> /etc/apt/sources.list
-    info "No-subscription repo added"
-else
-    warn "No-subscription repo already present"
-fi
-
 # Remove subscription nag
 info "Removing subscription nag"
 JS_FILE="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
@@ -309,6 +320,13 @@ source /etc/network/interfaces.d/*
 EOF
 
 info "Network config written"
+
+# Bring up WAN bridge immediately so VM creation can use it
+info "Bringing up ${WAN_BRIDGE}..."
+ifup "${WAN_BRIDGE}" 2>/dev/null || ip link add name "${WAN_BRIDGE}" type bridge && \
+    ip link set "${WAN_NIC}" master "${WAN_BRIDGE}" && \
+    ip link set "${WAN_BRIDGE}" up
+info "${WAN_BRIDGE} is up"
 
 # =============================================================
 # PHASE 5 — WIFI ACCESS POINT
