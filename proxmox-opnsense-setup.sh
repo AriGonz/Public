@@ -3,7 +3,7 @@
 # Proxmox VE — Portable OPNsense Firewall Setup Script
 # Repo   : github.com/AriGonz/Public
 # Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/proxmox-opnsense-setup.sh)"
-# Version: 1.5
+# Version: 1.7
 # =============================================================
 
 set -euo pipefail
@@ -17,7 +17,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="1.5"
+SCRIPT_VERSION="1.7"
 
 info()    { echo -e "${GREEN}[+]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
@@ -336,9 +336,51 @@ else
 fi
 
 # =============================================================
-# PHASE 4 — NETWORK CONFIGURATION
+# PHASE 4 — NETBIRD
 # =============================================================
-step "PHASE 4: Network Configuration"
+step "PHASE 4: Netbird"
+
+info "Installing Netbird..."
+curl -fsSL https://pkgs.netbird.io/install.sh | bash
+
+info "Connecting to Netbird management server..."
+netbird up --management-url "$NETBIRD_MGMT" &
+sleep 5
+
+# Extract and display the auth URL
+NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
+
+echo ""
+echo -e "${YELLOW}${BOLD}━━━ Netbird Authorization Required ━━━${NC}"
+if [[ -n "$NETBIRD_AUTH_URL" ]]; then
+    echo -e "  Open this URL to authorize this device:"
+    echo -e "  ${CYAN}${NETBIRD_AUTH_URL}${NC}"
+else
+    echo -e "  Run ${CYAN}netbird status${NC} to get your authorization URL"
+    echo -e "  Management URL: ${CYAN}${NETBIRD_MGMT}${NC}"
+fi
+echo ""
+
+# Poll until Netbird is connected
+info "Waiting for Netbird authorization..."
+while true; do
+    NETBIRD_FULL=$(netbird status 2>/dev/null || true)
+    if echo "$NETBIRD_FULL" | grep -qi "connected"; then
+        NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        echo ""
+        success "Netbird connected! Your Netbird IP: ${CYAN}${NETBIRD_IP}${NC}"
+        break
+    fi
+    NETBIRD_STATE=$(echo "$NETBIRD_FULL" | grep -i "status\|state" | head -1 | awk '{print $NF}' || echo "waiting")
+    echo -ne "\r  [~] Netbird status: ${YELLOW}${NETBIRD_STATE:-waiting}${NC} — authorize at the URL above...     "
+    sleep 5
+done
+echo ""
+
+# =============================================================
+# PHASE 5 — NETWORK CONFIGURATION
+# =============================================================
+step "PHASE 5: Network Configuration"
 
 info "Backing up current network config"
 cp /etc/network/interfaces /etc/network/interfaces.bak.$(date +%Y%m%d%H%M%S)
@@ -374,16 +416,18 @@ info "Network config written"
 
 # Bring up WAN bridge immediately so VM creation can use it
 info "Bringing up ${WAN_BRIDGE}..."
-ifup "${WAN_BRIDGE}" 2>/dev/null || ip link add name "${WAN_BRIDGE}" type bridge && \
-    ip link set "${WAN_NIC}" master "${WAN_BRIDGE}" && \
-    ip link set "${WAN_BRIDGE}" up
+ifup "${WAN_BRIDGE}" 2>/dev/null || {
+    ip link add name "${WAN_BRIDGE}" type bridge 2>/dev/null || true
+    ip link set "${WAN_NIC}" master "${WAN_BRIDGE}" 2>/dev/null || true
+    ip link set "${WAN_BRIDGE}" up 2>/dev/null || true
+}
 info "${WAN_BRIDGE} is up"
 
 # =============================================================
-# PHASE 5 — WIFI ACCESS POINT
+# PHASE 6 — WIFI ACCESS POINT
 # =============================================================
 if [[ "$SKIP_WIFI" == "false" ]]; then
-    step "PHASE 5: WiFi Access Point"
+    step "PHASE 6: WiFi Access Point"
 
     while true; do
         read -rsp "$(echo -e "${CYAN}WiFi password for '${WIFI_SSID}'${NC} (min 8 chars): ")" WIFI_PASS
@@ -419,13 +463,13 @@ EOF
     systemctl enable hostapd
     info "WiFi AP configured (will start after network cutover)"
 else
-    step "PHASE 5: WiFi Access Point — SKIPPED (no compatible WiFi NIC)"
+    step "PHASE 6: WiFi Access Point — SKIPPED (no compatible WiFi NIC)"
 fi
 
 # =============================================================
-# PHASE 6 — OPNSENSE VM
+# PHASE 7 — OPNSENSE VM
 # =============================================================
-step "PHASE 6: OPNsense VM"
+step "PHASE 7: OPNsense VM"
 
 # Wait for ISO download to complete if still running
 if [[ -n "$ISO_DOWNLOAD_PID" ]]; then
@@ -478,48 +522,6 @@ qm start "$VM_ID"
 sleep 3
 qm status "$VM_ID"
 info "OPNsense is booting"
-
-# =============================================================
-# PHASE 7 — NETBIRD
-# =============================================================
-step "PHASE 7: Netbird"
-
-info "Installing Netbird..."
-curl -fsSL https://pkgs.netbird.io/install.sh | bash
-
-info "Connecting to Netbird management server..."
-netbird up --management-url "$NETBIRD_MGMT" &
-sleep 5
-
-# Extract and display the auth URL
-NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
-
-echo ""
-echo -e "${YELLOW}${BOLD}━━━ Netbird Authorization Required ━━━${NC}"
-if [[ -n "$NETBIRD_AUTH_URL" ]]; then
-    echo -e "  Open this URL to authorize this device:"
-    echo -e "  ${CYAN}${NETBIRD_AUTH_URL}${NC}"
-else
-    echo -e "  Run ${CYAN}netbird status${NC} to get your authorization URL"
-    echo -e "  Management URL: ${CYAN}${NETBIRD_MGMT}${NC}"
-fi
-echo ""
-
-# Poll until Netbird is connected
-info "Waiting for Netbird authorization..."
-while true; do
-    NETBIRD_FULL=$(netbird status 2>/dev/null || true)
-    if echo "$NETBIRD_FULL" | grep -qi "connected"; then
-        NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        echo ""
-        success "Netbird connected! Your Netbird IP: ${CYAN}${NETBIRD_IP}${NC}"
-        break
-    fi
-    NETBIRD_STATE=$(echo "$NETBIRD_FULL" | grep -i "status\|state" | head -1 | awk '{print $NF}' || echo "waiting")
-    echo -ne "\r  [~] Netbird status: ${YELLOW}${NETBIRD_STATE:-waiting}${NC} — authorize at the URL above...     "
-    sleep 5
-done
-echo ""
 
 # =============================================================
 # PHASE 8 — NETWORK CUTOVER
