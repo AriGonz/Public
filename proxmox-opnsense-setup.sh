@@ -211,6 +211,23 @@ info "All pre-checks passed! Starting setup..."
 sleep 2
 
 # =============================================================
+# START ISO DOWNLOAD IN BACKGROUND (while other phases run)
+# =============================================================
+ISO_DOWNLOAD_PID=""
+if [[ -f "$ISO_PATH" ]]; then
+    info "OPNsense ISO already exists — skipping download"
+else
+    info "Starting OPNsense ${OPNSENSE_VER} ISO download in background..."
+    (
+        wget -q -O "/var/lib/vz/template/iso/${ISO_BZ2}" "$ISO_URL" && \
+        bunzip2 -k "/var/lib/vz/template/iso/${ISO_BZ2}" && \
+        rm -f "/var/lib/vz/template/iso/${ISO_BZ2}"
+    ) &
+    ISO_DOWNLOAD_PID=$!
+    info "ISO downloading in background (PID: ${ISO_DOWNLOAD_PID}) — setup will continue"
+fi
+
+# =============================================================
 # NIC SELECTION
 # =============================================================
 step "NIC Selection"
@@ -376,17 +393,25 @@ fi
 # =============================================================
 step "PHASE 6: OPNsense VM"
 
-# Download ISO
-if [[ -f "$ISO_PATH" ]]; then
-    warn "OPNsense ISO already exists at ${ISO_PATH} — skipping download"
-else
-    info "Downloading OPNsense ${OPNSENSE_VER} ISO..."
-    wget -q --show-progress -O "/var/lib/vz/template/iso/${ISO_BZ2}" "$ISO_URL"
-    info "Extracting ISO..."
-    bunzip2 -k "/var/lib/vz/template/iso/${ISO_BZ2}"
-    rm -f "/var/lib/vz/template/iso/${ISO_BZ2}"
-    info "ISO ready: ${ISO_PATH}"
+# Wait for ISO download to complete if still running
+if [[ -n "$ISO_DOWNLOAD_PID" ]]; then
+    if kill -0 "$ISO_DOWNLOAD_PID" 2>/dev/null; then
+        info "Waiting for OPNsense ISO download to complete..."
+        while kill -0 "$ISO_DOWNLOAD_PID" 2>/dev/null; do
+            DOWNLOADED=$(du -sh "/var/lib/vz/template/iso/${ISO_BZ2}" 2>/dev/null | cut -f1 || echo "0")
+            printf "\r  [~] Downloaded so far: %s    " "$DOWNLOADED"
+            sleep 3
+        done
+        echo ""
+        wait "$ISO_DOWNLOAD_PID" && info "ISO download complete" || error "ISO download failed — re-run the script"
+    else
+        info "ISO download already completed"
+    fi
 fi
+
+# Verify ISO exists
+[[ -f "$ISO_PATH" ]] || error "ISO not found at ${ISO_PATH} — download may have failed"
+info "ISO ready: ${ISO_PATH}"
 
 # Create VM
 info "Creating OPNsense VM (ID: ${VM_ID})"
