@@ -3,7 +3,7 @@
 # Proxmox VE — Portable OPNsense Firewall Setup Script
 # Repo   : github.com/AriGonz/Public
 # Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/proxmox-opnsense-setup.sh)"
-# Version: 1.7
+# Version: 1.9
 # =============================================================
 
 set -euo pipefail
@@ -17,7 +17,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="1.7"
+SCRIPT_VERSION="1.9"
 
 info()    { echo -e "${GREEN}[+]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[!]${NC} $1"; }
@@ -315,12 +315,15 @@ else
     warn "proxmoxlib.js not found — skipping nag removal"
 fi
 
-# Update packages
-info "Running apt full-upgrade (this may take a while)..."
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y -q
-apt-get autoremove -y -qq
-info "System updated"
+# Update packages in background so Netbird setup can run in parallel
+info "Starting apt full-upgrade in background..."
+(
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y -q
+    apt-get autoremove -y -qq
+) >> /var/log/proxmox-setup-apt.log 2>&1 &
+APT_UPGRADE_PID=$!
+info "apt full-upgrade running in background (PID: ${APT_UPGRADE_PID}) → /var/log/proxmox-setup-apt.log"
 
 # SSH key
 info "Adding SSH key"
@@ -344,11 +347,20 @@ info "Installing Netbird..."
 curl -fsSL https://pkgs.netbird.io/install.sh | bash
 
 info "Connecting to Netbird management server..."
-netbird up --management-url "$NETBIRD_MGMT" &
-sleep 5
+# Capture netbird up output to a temp file — it prints the auth URL there
+NETBIRD_LOG=$(mktemp /tmp/netbird-XXXXX.log)
+netbird up --management-url "$NETBIRD_MGMT" > "$NETBIRD_LOG" 2>&1 &
 
-# Extract and display the auth URL
-NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
+# Wait 10s for netbird up to print the auth URL
+info "Waiting 10s for Netbird to initialize..."
+sleep 10
+
+# Get auth URL from netbird up output (primary) or netbird status (fallback)
+NETBIRD_AUTH_URL=$(grep -oE 'https://[^ ]+' "$NETBIRD_LOG" 2>/dev/null \
+    | grep -v 'pkgs\|install\|docs' | head -1 || true)
+if [[ -z "$NETBIRD_AUTH_URL" ]]; then
+    NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
+fi
 
 echo ""
 echo -e "${YELLOW}${BOLD}━━━ Netbird Authorization Required ━━━${NC}"
@@ -366,7 +378,12 @@ info "Waiting for Netbird authorization..."
 while true; do
     NETBIRD_FULL=$(netbird status 2>/dev/null || true)
     if echo "$NETBIRD_FULL" | grep -qi "connected"; then
+        # Primary: parse 100.x.x.x from status output
         NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        # Fallback: read directly from the wt0 interface
+        if [[ -z "$NETBIRD_IP" ]]; then
+            NETBIRD_IP=$(ip addr show wt0 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        fi
         echo ""
         success "Netbird connected! Your Netbird IP: ${CYAN}${NETBIRD_IP}${NC}"
         break
@@ -376,6 +393,16 @@ while true; do
     sleep 5
 done
 echo ""
+
+# Wait for background apt upgrade before continuing
+if [[ -n "${APT_UPGRADE_PID:-}" ]]; then
+    if kill -0 "$APT_UPGRADE_PID" 2>/dev/null; then
+        info "Waiting for apt full-upgrade to finish..."
+        wait "$APT_UPGRADE_PID" && info "System updated" || warn "apt full-upgrade had errors — check /var/log/proxmox-setup-apt.log"
+    else
+        info "apt full-upgrade already completed"
+    fi
+fi
 
 # =============================================================
 # PHASE 5 — NETWORK CONFIGURATION
@@ -416,7 +443,7 @@ info "Network config written"
 
 # Bring up WAN bridge immediately so VM creation can use it
 info "Bringing up ${WAN_BRIDGE}..."
-ifup "${WAN_BRIDGE}" 2>/dev/null || {
+timeout 15 ifup "${WAN_BRIDGE}" 2>/dev/null || {
     ip link add name "${WAN_BRIDGE}" type bridge 2>/dev/null || true
     ip link set "${WAN_NIC}" master "${WAN_BRIDGE}" 2>/dev/null || true
     ip link set "${WAN_BRIDGE}" up 2>/dev/null || true
