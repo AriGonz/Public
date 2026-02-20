@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .12
+# Version .13
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.12${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.13${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -45,16 +45,6 @@ fi
 apt-get update -qq
 success "Repos configured"
 
-# ── Subscription nag removal ────────────────────────
-JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
-if [[ -f "$JS" ]]; then
-    cp "$JS" "${JS}.bak.$(date +%s)" 2>/dev/null || true
-    sed -Ezi 's/(Ext\.Msg\.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS"
-    echo "→ Restarting pveproxy..."
-    systemctl stop pveproxy 2>/dev/null || true; sleep 2; pkill -9 -f pveproxy 2>/dev/null || true
-    systemctl start pveproxy
-    success "Subscription nag removed"
-fi
 
 mkdir -p /root/.ssh
 echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHgzljgx9gDLlln3EEE/vcPvr9NMz7kLiLraofNzeQoO pve-xx" >> /root/.ssh/authorized_keys
@@ -212,8 +202,18 @@ MOTD
 chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
-step "PHASE 8 — Final Verification"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.12)${NC}"
+step "PHASE 8 — Subscription Nag Removal"
+JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
+if [[ -f "$JS" ]]; then
+    cp "$JS" "${JS}.bak.$(date +%s)" 2>/dev/null || true
+    sed -Ezi 's/(Ext\.Msg\.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS"
+    success "Subscription nag patched — will take effect after reboot"
+else
+    warn "proxmoxlib.js not found — skipping nag removal"
+fi
+
+step "PHASE 9 — Final Verification"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.13)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
