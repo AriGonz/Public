@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .17
+# Version .18
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.17${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.18${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -23,6 +23,23 @@ error() { echo -e "${RED}✖ $1${NC}"; exit 1; }
 [[ $EUID -eq 0 ]] || error "Run as root"
 command -v pveversion >/dev/null || error "Not on Proxmox"
 ping -c1 8.8.8.8 >/dev/null 2>&1 || error "No internet"
+
+# Netbird pre-check — skip Phase 5 if already installed and connected
+NETBIRD_CONNECTED=false
+NETBIRD_IP=""
+BOLD='\033[1m'; CYAN='\033[0;36m'; BWHITE='\033[1;37m'; BYELLOW='\033[1;33m'; BCYAN='\033[1;36m'
+if command -v netbird >/dev/null 2>&1; then
+    NETBIRD_FULL=$(netbird status 2>/dev/null || true)
+    if echo "$NETBIRD_FULL" | grep -qi "connected"; then
+        NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        [[ -z "$NETBIRD_IP" ]] && NETBIRD_IP=$(ip addr show wt0 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+        NETBIRD_CONNECTED=true
+        success "Netbird already installed and connected (IP: ${NETBIRD_IP}) — Phase 5 will be skipped"
+    else
+        warn "Netbird installed but not connected — Phase 5 will run normally"
+    fi
+fi
+
 success "All pre-checks passed"
 
 step "PHASE 0 — Repository Setup"
@@ -117,99 +134,97 @@ EOF
 fi
 
 step "PHASE 5 — Netbird"
-curl -fsSL https://pkgs.netbird.io/install.sh | sh
-
-echo -e "Connecting to Netbird management server..."
-# Run netbird up in background and capture output for the auth URL
-NETBIRD_LOG=$(mktemp /tmp/netbird-XXXXX.log)
-netbird up --management-url https://netbird.arigonz.com > "$NETBIRD_LOG" 2>&1 &
-
-# Wait 10s for netbird up to print the auth URL
-echo -e "Waiting 10s for Netbird to initialize..."
-sleep 10
-
-# Extract auth URL from netbird up output, fall back to netbird status
-NETBIRD_AUTH_URL=$(grep -oE 'https://[^ ]+' "$NETBIRD_LOG" 2>/dev/null \
-    | grep -v 'pkgs\|install\|docs' | head -1 || true)
-if [[ -z "$NETBIRD_AUTH_URL" ]]; then
-    NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
-fi
-
-BOLD='\033[1m'; CYAN='\033[0;36m'; BWHITE='\033[1;37m'; BYELLOW='\033[1;33m'; BCYAN='\033[1;36m'
-echo ""
-echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BYELLOW}${BOLD}   ★  Netbird Authorization Required  ★${NC}"
-echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-if [[ -n "$NETBIRD_AUTH_URL" ]]; then
-    echo -e "${BWHITE}${BOLD}  Open this URL to authorize this device:${NC}"
-    echo -e "${BCYAN}${BOLD}  ${NETBIRD_AUTH_URL}${NC}"
+if [[ "$NETBIRD_CONNECTED" == true ]]; then
+    success "Netbird already connected (IP: ${NETBIRD_IP}) — skipping"
 else
-    echo -e "${BWHITE}${BOLD}  Run 'netbird status' to get your authorization URL${NC}"
-    echo -e "${BWHITE}${BOLD}  Management URL: ${BCYAN}https://netbird.arigonz.com${NC}"
-fi
-echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
+    curl -fsSL https://pkgs.netbird.io/install.sh | sh
 
-# Poll until Netbird is connected
-NETBIRD_CONNECTED=false
-echo -e "${BYELLOW}${BOLD}⏳ Waiting for Netbird authorization...${NC}"
+    echo -e "Connecting to Netbird management server..."
+    # Run netbird up in background and capture output for the auth URL
+    NETBIRD_LOG=$(mktemp /tmp/netbird-XXXXX.log)
+    netbird up --management-url https://netbird.arigonz.com > "$NETBIRD_LOG" 2>&1 &
 
-# Helper: check if netbird is connected, sets NETBIRD_CONNECTED and NETBIRD_IP
-check_netbird() {
-    local NETBIRD_FULL
-    NETBIRD_FULL=$(netbird status 2>/dev/null || true)
-    if echo "$NETBIRD_FULL" | grep -qi "connected"; then
-        NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        if [[ -z "$NETBIRD_IP" ]]; then
-            NETBIRD_IP=$(ip addr show wt0 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        fi
-        NETBIRD_CONNECTED=true
-        return 0
+    # Wait 10s for netbird up to print the auth URL
+    echo -e "Waiting 10s for Netbird to initialize..."
+    sleep 10
+
+    # Extract auth URL from netbird up output, fall back to netbird status
+    NETBIRD_AUTH_URL=$(grep -oE 'https://[^ ]+' "$NETBIRD_LOG" 2>/dev/null \
+        | grep -v 'pkgs\|install\|docs' | head -1 || true)
+    if [[ -z "$NETBIRD_AUTH_URL" ]]; then
+        NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
     fi
-    return 1
-}
 
-# Wait 10 seconds before first check
-sleep 10
-
-# Check every 1 second for 10 seconds in the background
-for i in {1..10}; do
-    if check_netbird; then
-        echo ""
-        success "Netbird connected! Netbird IP: ${NETBIRD_IP}"
-        break
-    fi
-    sleep 1
-done
-
-# If still not connected, ask the user
-if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo ""
-    while true; do
-        read -p "$(echo -e "${BYELLOW}${BOLD}Have you authorized the device at the URL above? (y/n): ${NC}")" USER_ANSWER
-        if [[ "${USER_ANSWER,,}" == "y" ]]; then
-            # Give it a few more seconds and check again
-            echo -e "${BYELLOW}${BOLD}⏳ Checking connection...${NC}"
-            for i in {1..10}; do
-                if check_netbird; then
-                    echo ""
-                    success "Netbird connected! Netbird IP: ${NETBIRD_IP}"
-                    break
-                fi
-                sleep 1
-            done
-            if [[ "$NETBIRD_CONNECTED" == true ]]; then
-                break
-            else
-                warn "Still not connected — please check the URL and try again"
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BYELLOW}${BOLD}   ★  Netbird Authorization Required  ★${NC}"
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    if [[ -n "$NETBIRD_AUTH_URL" ]]; then
+        echo -e "${BWHITE}${BOLD}  Open this URL to authorize this device:${NC}"
+        echo -e "${BCYAN}${BOLD}  ${NETBIRD_AUTH_URL}${NC}"
+    else
+        echo -e "${BWHITE}${BOLD}  Run 'netbird status' to get your authorization URL${NC}"
+        echo -e "${BWHITE}${BOLD}  Management URL: ${BCYAN}https://netbird.arigonz.com${NC}"
+    fi
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+
+    echo -e "${BYELLOW}${BOLD}⏳ Waiting for Netbird authorization...${NC}"
+
+    # Helper: check if netbird is connected, sets NETBIRD_CONNECTED and NETBIRD_IP
+    check_netbird() {
+        local NETBIRD_FULL
+        NETBIRD_FULL=$(netbird status 2>/dev/null || true)
+        if echo "$NETBIRD_FULL" | grep -qi "connected"; then
+            NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+            if [[ -z "$NETBIRD_IP" ]]; then
+                NETBIRD_IP=$(ip addr show wt0 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
             fi
-        elif [[ "${USER_ANSWER,,}" == "n" ]]; then
-            warn "Netbird not authorized — skipping Netbird-dependent steps"
+            NETBIRD_CONNECTED=true
+            return 0
+        fi
+        return 1
+    }
+
+    # Wait 10 seconds before first check
+    sleep 10
+
+    # Check every 1 second for 10 seconds
+    for i in {1..10}; do
+        if check_netbird; then
+            echo ""
+            success "Netbird connected! Netbird IP: ${NETBIRD_IP}"
             break
         fi
+        sleep 1
     done
+
+    # If still not connected, ask the user
+    if [[ "$NETBIRD_CONNECTED" == false ]]; then
+        echo ""
+        while true; do
+            read -p "$(echo -e "${BYELLOW}${BOLD}Have you authorized the device at the URL above? (y/n): ${NC}")" USER_ANSWER
+            if [[ "${USER_ANSWER,,}" == "y" ]]; then
+                # Give it a few more seconds and check again
+                echo -e "${BYELLOW}${BOLD}⏳ Checking connection...${NC}"
+                for i in {1..10}; do
+                    if check_netbird; then
+                        echo ""
+                        success "Netbird connected! Netbird IP: ${NETBIRD_IP}"
+                        break
+                    fi
+                    sleep 1
+                done
+                [[ "$NETBIRD_CONNECTED" == true ]] && break
+                warn "Still not connected — please check the URL and try again"
+            elif [[ "${USER_ANSWER,,}" == "n" ]]; then
+                warn "Netbird not authorized — skipping Netbird-dependent steps"
+                break
+            fi
+        done
+    fi
+    echo ""
 fi
-echo ""
 
 step "PHASE 6 — Cloudflared"
 mkdir -p --mode=0755 /usr/share/keyrings
@@ -285,7 +300,7 @@ else
 fi
 
 step "PHASE 9 — Final Verification"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.17)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.18)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
