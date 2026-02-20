@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .14
+# Version .17
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.14${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.17${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -55,7 +55,7 @@ step "PHASE 2 — User Input"
 read -p "Hostname [$(hostname)]: " NEWHOST
 [[ -n "$NEWHOST" ]] && hostnamectl set-hostname "$NEWHOST" && echo "$NEWHOST" > /etc/hostname
 
-read -p "Cloudflared Tunnel Token (optional): " CLOUDFLARED_TOKEN
+
 
 step "PHASE 3 — Proxmox Post-Install"
 apt-get full-upgrade -y && apt-get autoremove -y
@@ -135,38 +135,80 @@ if [[ -z "$NETBIRD_AUTH_URL" ]]; then
     NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
 fi
 
+BOLD='\033[1m'; CYAN='\033[0;36m'; BWHITE='\033[1;37m'; BYELLOW='\033[1;33m'; BCYAN='\033[1;36m'
 echo ""
-echo -e "${YELLOW}━━━ Netbird Authorization Required ━━━${NC}"
+echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BYELLOW}${BOLD}   ★  Netbird Authorization Required  ★${NC}"
+echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 if [[ -n "$NETBIRD_AUTH_URL" ]]; then
-    echo -e "  Open this URL to authorize this device:"
-    echo -e "  ${NETBIRD_AUTH_URL}"
+    echo -e "${BWHITE}${BOLD}  Open this URL to authorize this device:${NC}"
+    echo -e "${BCYAN}${BOLD}  ${NETBIRD_AUTH_URL}${NC}"
 else
-    echo -e "  Run 'netbird status' to get your authorization URL"
-    echo -e "  Management URL: https://netbird.arigonz.com"
+    echo -e "${BWHITE}${BOLD}  Run 'netbird status' to get your authorization URL${NC}"
+    echo -e "${BWHITE}${BOLD}  Management URL: ${BCYAN}https://netbird.arigonz.com${NC}"
 fi
+echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
 # Poll until Netbird is connected
 NETBIRD_CONNECTED=false
-echo -e "Waiting for Netbird authorization..."
-while true; do
+echo -e "${BYELLOW}${BOLD}⏳ Waiting for Netbird authorization...${NC}"
+
+# Helper: check if netbird is connected, sets NETBIRD_CONNECTED and NETBIRD_IP
+check_netbird() {
+    local NETBIRD_FULL
     NETBIRD_FULL=$(netbird status 2>/dev/null || true)
     if echo "$NETBIRD_FULL" | grep -qi "connected"; then
-        # Primary: parse 100.x.x.x from status output
         NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-        # Fallback: read directly from the wt0 interface
         if [[ -z "$NETBIRD_IP" ]]; then
             NETBIRD_IP=$(ip addr show wt0 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
         fi
+        NETBIRD_CONNECTED=true
+        return 0
+    fi
+    return 1
+}
+
+# Wait 10 seconds before first check
+sleep 10
+
+# Check every 1 second for 10 seconds in the background
+for i in {1..10}; do
+    if check_netbird; then
         echo ""
         success "Netbird connected! Netbird IP: ${NETBIRD_IP}"
-        NETBIRD_CONNECTED=true
         break
     fi
-    NETBIRD_STATE=$(echo "$NETBIRD_FULL" | grep -i "status\|state" | head -1 | awk '{print $NF}' || echo "waiting")
-    echo -ne "\r  [~] Netbird status: ${NETBIRD_STATE:-waiting} — authorize at the URL above...     "
-    sleep 5
+    sleep 1
 done
+
+# If still not connected, ask the user
+if [[ "$NETBIRD_CONNECTED" == false ]]; then
+    echo ""
+    while true; do
+        read -p "$(echo -e "${BYELLOW}${BOLD}Have you authorized the device at the URL above? (y/n): ${NC}")" USER_ANSWER
+        if [[ "${USER_ANSWER,,}" == "y" ]]; then
+            # Give it a few more seconds and check again
+            echo -e "${BYELLOW}${BOLD}⏳ Checking connection...${NC}"
+            for i in {1..10}; do
+                if check_netbird; then
+                    echo ""
+                    success "Netbird connected! Netbird IP: ${NETBIRD_IP}"
+                    break
+                fi
+                sleep 1
+            done
+            if [[ "$NETBIRD_CONNECTED" == true ]]; then
+                break
+            else
+                warn "Still not connected — please check the URL and try again"
+            fi
+        elif [[ "${USER_ANSWER,,}" == "n" ]]; then
+            warn "Netbird not authorized — skipping Netbird-dependent steps"
+            break
+        fi
+    done
+fi
 echo ""
 
 step "PHASE 6 — Cloudflared"
@@ -174,11 +216,7 @@ mkdir -p --mode=0755 /usr/share/keyrings
 curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null
 echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' | tee /etc/apt/sources.list.d/cloudflared.list
 apt-get update && apt-get install -y cloudflared
-if [[ -n "$CLOUDFLARED_TOKEN" ]]; then
-    cloudflared service install "$CLOUDFLARED_TOKEN"
-    systemctl restart cloudflared 2>/dev/null || true
-    success "Cloudflared installed & service created"
-fi
+success "Cloudflared installed — run 'cloudflared service install <token>' to configure tunnel"
 
 step "PHASE 7 — Security + Dynamic MOTD + mDNS"
 # FIX 3: Only enable UFW after confirming Netbird is connected,
@@ -247,7 +285,7 @@ else
 fi
 
 step "PHASE 9 — Final Verification"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.14)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.17)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
