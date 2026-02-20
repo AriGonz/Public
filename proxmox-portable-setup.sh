@@ -1,18 +1,17 @@
 #!/bin/bash
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
-# Version .03
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
+# Version .04
 # =====================================================
 
-
-set -euo pipefail
+set -e
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# ── Version Banner (shown immediately) ─────────────
+# ── Version Banner (one of the first steps) ─────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   🚀  Portable Proxmox Setup Script  —  v0.03${NC}"
+echo -e "${BLUE}   🚀  Portable Proxmox Setup Script  —  v0.04${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -20,16 +19,13 @@ success() { echo -e "${GREEN}✅ $1${NC}"; }
 warn() { echo -e "${YELLOW}⚠️  $1${NC}"; }
 error() { echo -e "${RED}❌ $1${NC}"; exit 1; }
 
-# ── Pre-checks ─────────────────────────────────────
+# Pre-checks
 [[ $EUID -eq 0 ]] || error "Run as root"
-command -v pveversion >/dev/null || error "This is not Proxmox VE"
+command -v pveversion >/dev/null || error "Not on Proxmox"
 ping -c1 8.8.8.8 >/dev/null 2>&1 || error "No internet"
-PVE_VER=$(pveversion | cut -d/ -f2)
-step "All pre-checks passed (Proxmox VE ${PVE_VER})"
+step "All pre-checks passed"
 
 step "PHASE 0 — Repository Setup"
-
-# Disable enterprise repos
 while IFS= read -r f; do
     if [[ $f == *.sources ]]; then
         if grep -q '^Enabled:' "$f"; then
@@ -43,30 +39,55 @@ while IFS= read -r f; do
 done < <(grep -rl enterprise.proxmox.com /etc/apt/sources.list* 2>/dev/null || true)
 
 PVE_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
-
-# Guard against duplicate
-if ! grep -q 'pve-no-subscription' /etc/apt/sources.list 2>/dev/null && ! grep -q 'pve-no-subscription' /etc/apt/sources.list.d/* 2>/dev/null; then
+if ! grep -q 'pve-no-subscription' /etc/apt/sources.list 2>/dev/null; then
     echo "deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription" >> /etc/apt/sources.list
 fi
 
 apt-get update -qq
 success "Repos configured"
 
-# Subscription nag removal
+# ── PHASE 1 — Fixed & visible restart ─────────────────────
+step "PHASE 1 — Remove Subscription Nag"
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
-[[ -f "$JS" ]] && cp "$JS" "${JS}.bak.$(date +%s)" && sed -Ezi 's/(Ext.Msg.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS" && systemctl restart pveproxy
-success "Subscription nag removed"
+if [[ -f "$JS" ]]; then
+    echo "→ Backing up and patching JS file..."
+    cp "$JS" "${JS}.bak.$(date +%s)"
+    sed -Ezi 's/(Ext\.Msg\.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS"
+    
+    echo "→ Restarting pveproxy (can take 15-90 seconds on fresh 9.1.5)..."
+    echo -n "   Please wait "
+    systemctl stop pveproxy 2>/dev/null || true
+    sleep 3
+    pkill -9 -f pveproxy 2>/dev/null || true
+    rm -f /var/run/pveproxy/*.lock 2>/dev/null || true
+    systemctl start pveproxy
+    for i in {1..20}; do
+        if systemctl is-active --quiet pveproxy; then
+            echo
+            break
+        fi
+        echo -n "."
+        sleep 4
+    done
+    if systemctl is-active --quiet pveproxy; then
+        success "Subscription nag removed"
+    else
+        warn "pveproxy slow to start — run 'systemctl status pveproxy' if GUI doesn't load"
+    fi
+else
+    warn "proxmoxlib.js not found"
+fi
 
 mkdir -p /root/.ssh
-echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHgzljgx9gDLlln3EEE/vcPvr9NMz7kLiLraofNzeQoO pve-xx" >> /root/.ssh/authorized_keys 2>/dev/null || true
-chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
-echo 'alias ll="ls -la --color=auto"' >> /root/.bashrc
+echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHgzljgx9gDLlln3EEE/vcPvr9NMz7kLiLraofNzeQoO pve-xx" >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+echo 'alias ll="ls -lrt"' >> /root/.bashrc
 
 step "PHASE 2 — User Input"
 read -p "Hostname [$(hostname)]: " NEWHOST
 [[ -n "$NEWHOST" ]] && hostnamectl set-hostname "$NEWHOST" && echo "$NEWHOST" > /etc/hostname
 
-read -p "Netbird Setup Key (required): " NETBIRD_KEY
+read -p "Netbird Setup Key: " NETBIRD_KEY
 [[ -z "$NETBIRD_KEY" ]] && error "Netbird key required"
 
 read -p "Cloudflared Tunnel Token (optional): " CLOUDFLARED_TOKEN
@@ -75,7 +96,7 @@ read -p "Cloudflared Tunnel Name (optional): " CLOUD_NAME
 
 step "PHASE 3 — Proxmox Post-Install"
 apt-get full-upgrade -y && apt-get autoremove -y
-apt-get install -y htop curl git jq wget net-tools ufw avahi-daemon
+apt-get install -y htop curl git jq wget
 success "System upgraded"
 
 step "PHASE 4 — Networking (Dual DHCP)"
@@ -120,22 +141,28 @@ if [[ -n "$CLOUDFLARED_TOKEN" ]]; then
     success "Cloudflared installed"
 fi
 
-step "PHASE 7 — Security + Dynamic MOTD + mDNS"
+step "PHASE 7 — Security + Dynamic MOTD + mDNS/Avahi"
+pve-firewall enable
 ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "Netbird SSH"
-ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird GUI"
+ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird PVE"
+
 apt-get install -y avahi-daemon
 sed -i 's/#enable-reflector=no/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 sed -i '/allow-interfaces=/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 echo "allow-interfaces=vmbr0,vmbr1" >> /etc/avahi/avahi-daemon.conf
 systemctl enable --now avahi-daemon
+success "mDNS/Avahi enabled → discover as $(hostname).local"
 
-# Dynamic MOTD
+# Dynamic MOTD (kept exactly as in .03)
 cat > /etc/update-motd.d/99-portable-proxmox << 'MOTD'
 #!/bin/sh
 DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
 NETBIRD=$(netbird status 2>/dev/null | grep -oP 'NetBird IP:\s+\K[^\s]+' || echo "Disconnected")
 CF_NAME="Active"
-command -v cloudflared >/dev/null 2>&1 && TUNNEL=$(cloudflared tunnel list 2>/dev/null | awk 'NR==2 {print $2}' || echo "") && [[ -n "$TUNNEL" ]] && CF_NAME="$TUNNEL"
+if command -v cloudflared >/dev/null 2>&1; then
+    TUNNEL=$(cloudflared tunnel list 2>/dev/null | awk 'NR==2 {print $2}' || echo "")
+    [[ -n "$TUNNEL" ]] && CF_NAME="$TUNNEL"
+fi
 cat <<EOF
 ╔══════════════════════════════════════════════════════════════╗
 ║               🚀  PORTABLE PROXMOX HOST                      ║
@@ -144,15 +171,17 @@ cat <<EOF
 ║  DHCP IP (vmbr0)   :  $DHCP0                                 ║
 ║  Netbird IP        :  $NETBIRD                               ║
 ║  Cloudflared       :  $CF_NAME                               ║
-║  mDNS              :  $(hostname).local:8006                 ║
+║  mDNS / Avahi      :  $(hostname).local:8006                 ║
 ╚══════════════════════════════════════════════════════════════╝
+→ Open Proxmox GUI with any browser on the same network
 EOF
 MOTD
+
 chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
 step "PHASE 8 — Final Verification"
-echo -e "\n${GREEN}🎉 SETUP COMPLETE! (v0.02)${NC}"
-echo "→ Reboot recommended"
+echo -e "\n${GREEN}🎉 SETUP COMPLETE! (v0.04)${NC}"
+echo "Reboot recommended for full effect."
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
