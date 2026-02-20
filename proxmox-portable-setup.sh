@@ -2,16 +2,16 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .04
+# Version .05
 # =====================================================
 
 set -e
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# ── Version Banner (first thing user sees) ─────────────
+# ── Version Banner (one of the first steps) ─────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   🚀  Portable Proxmox Setup Script  —  v0.04${NC}"
+echo -e "${BLUE}   🚀  Portable Proxmox Setup Script  —  v0.05${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -45,7 +45,7 @@ fi
 apt-get update -qq
 success "Repos configured"
 
-# PHASE 1 — Nag removal
+# PHASE 1 — Nag removal (with progress)
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 if [[ -f "$JS" ]]; then
     cp "$JS" "${JS}.bak.$(date +%s)"
@@ -78,13 +78,13 @@ apt-get install -y htop curl git jq wget
 success "System upgraded"
 
 step "PHASE 4 — Networking (Dual DHCP)"
-echo -e "${RED}⚠️  WARNING — This will overwrite /etc/network/interfaces and restart networking.${NC}"
-echo -e "${RED}   Your SSH connection WILL DROP.${NC}"
-echo -e "${RED}   After this step you must reconnect using the new DHCP IP on vmbr0${NC}"
-echo -e "${RED}   (or use the Proxmox console/noVNC).${NC}"
-read -p "Continue and accept SSH disconnect? (y/N): " CONFIRM
+echo -e "${RED}⚠️  CRITICAL WARNING — SSH WILL DROP${NC}"
+echo -e "${RED}This will overwrite /etc/network/interfaces and restart networking.${NC}"
+echo -e "${RED}You will lose this SSH session immediately.${NC}"
+echo -e "${RED}Reconnect using the new DHCP IP shown on your router (vmbr0).${NC}"
+read -p "Continue and accept disconnect? (y/N): " CONFIRM
 if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-    warn "Networking skipped — setup continuing without network change"
+    warn "Networking skipped — continuing without change"
 else
     cp /etc/network/interfaces /etc/network/interfaces.bak.$(date +%s) 2>/dev/null || true
     PHYS_NICS=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(en|eth)' | grep -vE 'veth|br|vmbr|bond')
@@ -109,7 +109,7 @@ INNER
 done)
 EOF
     ifreload -a 2>/dev/null || systemctl restart networking
-    success "Dual DHCP bridges ready (SSH has likely dropped)"
+    success "Dual DHCP bridges ready (SSH has dropped)"
 fi
 
 step "PHASE 5 — Netbird"
@@ -128,18 +128,16 @@ if [[ -n "$CLOUDFLARED_TOKEN" ]]; then
     success "Cloudflared installed"
 fi
 
-step "PHASE 7 — Security + Dynamic MOTD + mDNS/Avahi"
+step "PHASE 7 — Security + Dynamic MOTD + mDNS"
 pve-firewall enable
 ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "Netbird SSH"
 ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird PVE"
-
 apt-get install -y avahi-daemon
 sed -i 's/#enable-reflector=no/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 sed -i '/allow-interfaces=/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 echo "allow-interfaces=vmbr0,vmbr1" >> /etc/avahi/avahi-daemon.conf
 systemctl enable --now avahi-daemon
 
-# Dynamic MOTD (unchanged)
 cat > /etc/update-motd.d/99-portable-proxmox << 'MOTD'
 #!/bin/sh
 DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
@@ -157,17 +155,15 @@ cat <<EOF
 ║  DHCP IP (vmbr0)   :  $DHCP0                                 ║
 ║  Netbird IP        :  $NETBIRD                               ║
 ║  Cloudflared       :  $CF_NAME                               ║
-║  mDNS / Avahi      :  $(hostname).local:8006                 ║
+║  mDNS              :  $(hostname).local:8006                 ║
 ╚══════════════════════════════════════════════════════════════╝
-→ Open Proxmox GUI with any browser on the same network
 EOF
 MOTD
 chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
 step "PHASE 8 — Final Verification"
-echo -e "\n${GREEN}🎉 SETUP COMPLETE! (v0.04)${NC}"
-echo "If SSH dropped → reconnect to the new DHCP IP shown on your router or use the Proxmox console."
-echo "Run 'pve-portable-status' after reconnecting."
+echo -e "\n${GREEN}🎉 SETUP COMPLETE! (v0.05)${NC}"
+echo "If SSH dropped → reconnect to the new vmbr0 DHCP IP"
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
