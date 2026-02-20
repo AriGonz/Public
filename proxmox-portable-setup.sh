@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .01
+# Version .02
 # =====================================================
 
 set -e
@@ -13,14 +13,39 @@ success() { echo -e "${GREEN}✅ $1${NC}"; }
 warn() { echo -e "${YELLOW}⚠️  $1${NC}"; }
 error() { echo -e "${RED}❌ $1${NC}"; exit 1; }
 
+# ── Pre-checks first (before making any changes) ──────────────────────────────
+[[ $EUID -eq 0 ]] || error "Run as root"
+command -v pveversion >/dev/null || error "Not on Proxmox"
+ping -c1 8.8.8.8 >/dev/null 2>&1 || error "No internet"
+step "All pre-checks passed"
+
 step "PHASE 0 — Repository Setup"
+
+# Disable enterprise repos.
+# FIX: deb822 .sources files often have NO 'Enabled:' line (implicitly enabled).
+# Simply matching 's/^Enabled:.*/Enabled: no/' finds nothing → repos stay active.
+# Solution: insert 'Enabled: no' before the Types: line when the field is absent.
 while IFS= read -r f; do
-    if [[ $f == *.sources ]]; then sed -i 's/^Enabled:.*/Enabled: no/' "$f"; else sed -i 's/^deb/#deb/' "$f"; fi
+    if [[ $f == *.sources ]]; then
+        if grep -q '^Enabled:' "$f"; then
+            sed -i 's/^Enabled:.*/Enabled: no/' "$f"
+        else
+            sed -i '/^Types:/i Enabled: no' "$f"
+        fi
+    else
+        sed -i 's/^deb/#deb/' "$f"
+    fi
 done < <(grep -rl enterprise.proxmox.com /etc/apt/sources.list* 2>/dev/null || true)
 
 PVE_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
-echo "deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription" >> /etc/apt/sources.list
+
+# Guard against duplicate no-subscription entry on re-runs
+if ! grep -q 'pve-no-subscription' /etc/apt/sources.list 2>/dev/null; then
+    echo "deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription" >> /etc/apt/sources.list
+fi
+
 apt-get update -qq
+success "Repos configured"
 
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 [[ -f "$JS" ]] && cp "$JS" "${JS}.bak.$(date +%s)" && sed -Ezi 's/(Ext.Msg.show\(\{\s+title: gettext\('No valid sub)/void(\{ \/\/\1/g' "$JS" && systemctl restart pveproxy
@@ -30,12 +55,6 @@ mkdir -p /root/.ssh
 echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHgzljgx9gDLlln3EEE/vcPvr9NMz7kLiLraofNzeQoO pve-xx" >> /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
 echo 'alias ll="ls -lrt"' >> /root/.bashrc
-
-step "PHASE 1 — Pre-Checks"
-[[ $EUID -eq 0 ]] || error "Run as root"
-command -v pveversion >/dev/null || error "Not on Proxmox"
-ping -c1 8.8.8.8 >/dev/null || error "No internet"
-step "All pre-checks passed"
 
 step "PHASE 2 — User Input"
 read -p "Hostname [$(hostname)]: " NEWHOST
@@ -76,7 +95,7 @@ INNER
 done)
 EOF
 
-ifreload -a || systemctl restart networking
+ifreload -a 2>/dev/null || systemctl restart networking
 success "Dual DHCP bridges ready"
 
 step "PHASE 5 — Netbird"
@@ -96,9 +115,10 @@ if [[ -n "$CLOUDFLARED_TOKEN" ]]; then
 fi
 
 step "PHASE 7 — Security + Dynamic MOTD + mDNS/Avahi"
-# Security (same as before)
 pve-firewall enable
-ufw allow from 100.64.0.0/10 to any port 22,8006 proto tcp comment "Netbird"
+# FIX: ufw doesn't support comma-separated ports — use separate rules
+ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "Netbird SSH"
+ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird PVE"
 
 # mDNS / Avahi
 apt-get install -y avahi-daemon
