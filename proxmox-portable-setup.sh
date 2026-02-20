@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .10
+# Version .11
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner + Important Warning ─────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.10${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.11${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 echo -e "${YELLOW}SECURITY NOTE: This script adds a hardcoded SSH public key to root.${NC}"
@@ -194,7 +194,7 @@ chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
 step "PHASE 8 — Final Verification"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.10)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.11)${NC}"
 echo "If SSH dropped → reconnect to the new vmbr0 DHCP IP"
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
