@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .02
+# Version .03
 # =====================================================
 
 set -e
@@ -48,7 +48,9 @@ apt-get update -qq
 success "Repos configured"
 
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
-[[ -f "$JS" ]] && cp "$JS" "${JS}.bak.$(date +%s)" && sed -Ezi 's/(Ext.Msg.show\(\{\s+title: gettext\('No valid sub)/void(\{ \/\/\1/g' "$JS" && systemctl restart pveproxy
+# FIX: literal ' inside a single-quoted sed expression breaks bash parsing.
+# Use . (any-char) in place of ' — it matches the same character without quoting issues.
+[[ -f "$JS" ]] && cp "$JS" "${JS}.bak.$(date +%s)" && sed -Ezi 's/(Ext.Msg.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS" && systemctl restart pveproxy
 success "Subscription nag removed"
 
 mkdir -p /root/.ssh
