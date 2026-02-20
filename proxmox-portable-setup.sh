@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .06
+# Version .10
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner + Important Warning ─────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.06${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.10${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 echo -e "${YELLOW}SECURITY NOTE: This script adds a hardcoded SSH public key to root.${NC}"
@@ -72,12 +72,10 @@ read -p "Netbird Setup Key: " NETBIRD_KEY
 [[ -z "$NETBIRD_KEY" ]] && error "Netbird key required"
 
 read -p "Cloudflared Tunnel Token (optional): " CLOUDFLARED_TOKEN
-read -p "Cloudflared Tunnel Name (optional): " CLOUD_NAME
-[[ -z "$CLOUD_NAME" ]] && CLOUD_NAME="Active"
 
 step "PHASE 3 — Proxmox Post-Install"
 apt-get full-upgrade -y && apt-get autoremove -y
-apt-get install -y htop curl git jq wget
+apt-get install -y htop curl git jq wget ufw
 success "System upgraded"
 
 step "PHASE 4 — Networking (Dual DHCP)"
@@ -120,7 +118,6 @@ iface $BR inet dhcp
 INNER
 done)
 EOF
-            # Apply changes - ifreload is preferred on Proxmox
             echo "Applying network config..."
             if command -v ifreload >/dev/null 2>&1; then
                 ifreload -a || true
@@ -139,8 +136,8 @@ fi
 
 step "PHASE 5 — Netbird"
 curl -fsSL https://pkgs.netbird.io/install.sh | sh
-netbird up --management-url https://netbird.arigonz.com --setup-key "$NETBIRD_KEY"
-sleep 12  # Give it a bit more time to settle
+netbird up --management-url https://netbird.arigonz.com --setup-key "$NETBIRD_KEY" --accept-routes
+sleep 12
 netbird status | grep -q Connected && success "Netbird connected" || warn "Netbird status not Connected — check manually"
 
 step "PHASE 6 — Cloudflared"
@@ -150,13 +147,16 @@ echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.c
 apt-get update && apt-get install -y cloudflared
 if [[ -n "$CLOUDFLARED_TOKEN" ]]; then
     cloudflared service install "$CLOUDFLARED_TOKEN"
+    systemctl restart cloudflared 2>/dev/null || true
     success "Cloudflared installed & service created"
 fi
 
 step "PHASE 7 — Security + Dynamic MOTD + mDNS"
 pve-firewall enable
+ufw --force enable
 ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "Netbird SSH"
 ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird PVE"
+ufw reload
 apt-get install -y avahi-daemon
 sed -i 's/#enable-reflector=no/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 sed -i '/allow-interfaces=/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
@@ -194,7 +194,7 @@ chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
 step "PHASE 8 — Final Verification"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.06)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.10)${NC}"
 echo "If SSH dropped → reconnect to the new vmbr0 DHCP IP"
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
