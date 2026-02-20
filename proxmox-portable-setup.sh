@@ -2,31 +2,28 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .11
+# Version .12
 # =====================================================
 
 set -e
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# ── Version Banner + Important Warning ─────────────
+# ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.11${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.12${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
-echo -e "${YELLOW}SECURITY NOTE: This script adds a hardcoded SSH public key to root.${NC}"
-echo -e "${YELLOW}Only use on trusted/personal devices. Edit/remove if not desired.${NC}\n"
-
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
-success() { echo -e "${GREEN}Success $1${NC}"; }
-warn() { echo -e "${YELLOW}Warning $1${NC}"; }
-error() { echo -e "${RED}Error $1${NC}"; exit 1; }
+success() { echo -e "${GREEN}✔ $1${NC}"; }
+warn() { echo -e "${YELLOW}⚠ $1${NC}"; }
+error() { echo -e "${RED}✖ $1${NC}"; exit 1; }
 
 # Pre-checks
 [[ $EUID -eq 0 ]] || error "Run as root"
 command -v pveversion >/dev/null || error "Not on Proxmox"
 ping -c1 8.8.8.8 >/dev/null 2>&1 || error "No internet"
-step "All pre-checks passed"
+success "All pre-checks passed"
 
 step "PHASE 0 — Repository Setup"
 while IFS= read -r f; do
@@ -48,7 +45,7 @@ fi
 apt-get update -qq
 success "Repos configured"
 
-# PHASE 1 — Nag removal
+# ── Subscription nag removal ────────────────────────
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 if [[ -f "$JS" ]]; then
     cp "$JS" "${JS}.bak.$(date +%s)" 2>/dev/null || true
@@ -83,7 +80,7 @@ step "PHASE 4 — Networking (Dual DHCP)"
 if grep -q '^auto vmbr0' /etc/network/interfaces 2>/dev/null && grep -q '^auto vmbr1' /etc/network/interfaces 2>/dev/null; then
     warn "vmbr0 and vmbr1 already appear in /etc/network/interfaces — skipping network rewrite"
 else
-    echo -e "${RED}Warning CRITICAL WARNING — SSH WILL DROP${NC}"
+    echo -e "${RED}⚠ CRITICAL WARNING — SSH WILL DROP${NC}"
     echo -e "${RED}This will overwrite /etc/network/interfaces and apply new config.${NC}"
     echo -e "${RED}You will lose this SSH session immediately.${NC}"
     echo -e "${RED}Reconnect using the new DHCP IP on vmbr0 (check your router).${NC}"
@@ -93,7 +90,6 @@ else
     else
         cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
 
-        # Improved NIC detection: modern names (ens, eno, enp, end, enx, etc.)
         PHYS_NICS=$(ip -o link show up | awk -F': ' '{print $2}' | grep '^e' | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap)' | sort -u)
         NIC_ARRAY=($PHYS_NICS)
 
@@ -118,7 +114,6 @@ iface $BR inet dhcp
 INNER
 done)
 EOF
-            echo "Applying network config..."
             if command -v ifreload >/dev/null 2>&1; then
                 ifreload -a || true
             else
@@ -136,9 +131,19 @@ fi
 
 step "PHASE 5 — Netbird"
 curl -fsSL https://pkgs.netbird.io/install.sh | sh
-netbird up --management-url https://netbird.arigonz.com --setup-key "$NETBIRD_KEY" --accept-routes
-sleep 12
-netbird status | grep -q Connected && success "Netbird connected" || warn "Netbird status not Connected — check manually"
+# FIX 2: Wrap netbird up so a failure doesn't abort the script via set -e
+NETBIRD_CONNECTED=false
+if netbird up --management-url https://netbird.arigonz.com --setup-key "$NETBIRD_KEY" --accept-routes; then
+    sleep 12
+    if netbird status | grep -q Connected; then
+        success "Netbird connected"
+        NETBIRD_CONNECTED=true
+    else
+        warn "Netbird up succeeded but status is not Connected — check manually"
+    fi
+else
+    warn "Netbird up failed — skipping Netbird-dependent steps"
+fi
 
 step "PHASE 6 — Cloudflared"
 mkdir -p --mode=0755 /usr/share/keyrings
@@ -152,11 +157,26 @@ if [[ -n "$CLOUDFLARED_TOKEN" ]]; then
 fi
 
 step "PHASE 7 — Security + Dynamic MOTD + mDNS"
-pve-firewall enable
-ufw --force enable
-ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "Netbird SSH"
-ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird PVE"
-ufw reload
+# FIX 3: Only enable UFW after confirming Netbird is connected,
+# to avoid locking yourself out of SSH (port 22 is restricted to
+# the Netbird CGNAT subnet 100.64.0.0/10 once UFW is enabled).
+if [[ "$NETBIRD_CONNECTED" == true ]]; then
+    pve-firewall enable
+    ufw --force enable
+    ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "Netbird SSH"
+    ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird PVE"
+    ufw reload
+    success "Firewall enabled — SSH and PVE UI restricted to Netbird subnet"
+else
+    warn "Netbird is NOT connected — skipping UFW/pve-firewall enable to avoid SSH lockout"
+    warn "Once Netbird is confirmed working, run manually:"
+    warn "  pve-firewall enable"
+    warn "  ufw --force enable"
+    warn "  ufw allow from 100.64.0.0/10 to any port 22 proto tcp"
+    warn "  ufw allow from 100.64.0.0/10 to any port 8006 proto tcp"
+    warn "  ufw reload"
+fi
+
 apt-get install -y avahi-daemon
 sed -i 's/#enable-reflector=no/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 sed -i '/allow-interfaces=/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
@@ -168,7 +188,6 @@ cat > /etc/update-motd.d/99-portable-proxmox << 'MOTD'
 DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
 NETBIRD=$(netbird status 2>/dev/null | grep -oP 'NetBird IP:\s+\K[^\s]+' || echo "Disconnected")
 
-# Improved Cloudflared status
 CF_NAME="Not installed"
 if command -v cloudflared >/dev/null 2>&1; then
     if systemctl is-active --quiet cloudflared 2>/dev/null; then
@@ -180,13 +199,13 @@ fi
 
 cat <<EOF
 ╔══════════════════════════════════════════════════════════════╗
-║               Portable Proxmox HOST                      ║
+║               Portable Proxmox HOST                          ║
 ╟──────────────────────────────────────────────────────────────╢
-║  Hostname          :  $(hostname)                            ║
-║  DHCP IP (vmbr0)   :  $DHCP0                                 ║
-║  Netbird IP        :  $NETBIRD                               ║
-║  Cloudflared       :  $CF_NAME                               ║
-║  mDNS              :  $(hostname).local:8006                 ║
+║  Hostname          :  $(hostname)
+║  DHCP IP (vmbr0)   :  $DHCP0
+║  Netbird IP        :  $NETBIRD
+║  Cloudflared       :  $CF_NAME
+║  mDNS              :  $(hostname).local:8006
 ╚══════════════════════════════════════════════════════════════╝
 EOF
 MOTD
@@ -194,7 +213,10 @@ chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
 step "PHASE 8 — Final Verification"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.11)${NC}"
-echo "If SSH dropped → reconnect to the new vmbr0 DHCP IP"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.12)${NC}"
+if [[ "$NETBIRD_CONNECTED" == false ]]; then
+    echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
+    echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
+fi
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
