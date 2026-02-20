@@ -9,7 +9,7 @@ set -e
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# ── Version Banner (one of the first steps) ─────────────
+# ── Version Banner (first thing user sees) ─────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}   🚀  Portable Proxmox Setup Script  —  v0.04${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
@@ -42,40 +42,18 @@ PVE_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
 if ! grep -q 'pve-no-subscription' /etc/apt/sources.list 2>/dev/null; then
     echo "deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription" >> /etc/apt/sources.list
 fi
-
 apt-get update -qq
 success "Repos configured"
 
-# ── PHASE 1 — Fixed & visible restart ─────────────────────
-step "PHASE 1 — Remove Subscription Nag"
+# PHASE 1 — Nag removal
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 if [[ -f "$JS" ]]; then
-    echo "→ Backing up and patching JS file..."
     cp "$JS" "${JS}.bak.$(date +%s)"
     sed -Ezi 's/(Ext\.Msg\.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS"
-    
-    echo "→ Restarting pveproxy (can take 15-90 seconds on fresh 9.1.5)..."
-    echo -n "   Please wait "
-    systemctl stop pveproxy 2>/dev/null || true
-    sleep 3
-    pkill -9 -f pveproxy 2>/dev/null || true
-    rm -f /var/run/pveproxy/*.lock 2>/dev/null || true
+    echo "→ Restarting pveproxy (10-60s)..."
+    systemctl stop pveproxy 2>/dev/null || true; sleep 2; pkill -9 -f pveproxy 2>/dev/null || true
     systemctl start pveproxy
-    for i in {1..20}; do
-        if systemctl is-active --quiet pveproxy; then
-            echo
-            break
-        fi
-        echo -n "."
-        sleep 4
-    done
-    if systemctl is-active --quiet pveproxy; then
-        success "Subscription nag removed"
-    else
-        warn "pveproxy slow to start — run 'systemctl status pveproxy' if GUI doesn't load"
-    fi
-else
-    warn "proxmoxlib.js not found"
+    success "Subscription nag removed"
 fi
 
 mkdir -p /root/.ssh
@@ -100,10 +78,19 @@ apt-get install -y htop curl git jq wget
 success "System upgraded"
 
 step "PHASE 4 — Networking (Dual DHCP)"
-PHYS_NICS=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(en|eth)' | grep -vE 'veth|br|vmbr|bond')
-NIC_ARRAY=($PHYS_NICS)
+echo -e "${RED}⚠️  WARNING — This will overwrite /etc/network/interfaces and restart networking.${NC}"
+echo -e "${RED}   Your SSH connection WILL DROP.${NC}"
+echo -e "${RED}   After this step you must reconnect using the new DHCP IP on vmbr0${NC}"
+echo -e "${RED}   (or use the Proxmox console/noVNC).${NC}"
+read -p "Continue and accept SSH disconnect? (y/N): " CONFIRM
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+    warn "Networking skipped — setup continuing without network change"
+else
+    cp /etc/network/interfaces /etc/network/interfaces.bak.$(date +%s) 2>/dev/null || true
+    PHYS_NICS=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(en|eth)' | grep -vE 'veth|br|vmbr|bond')
+    NIC_ARRAY=($PHYS_NICS)
 
-cat > /etc/network/interfaces <<EOF
+    cat > /etc/network/interfaces <<EOF
 auto lo
 iface lo inet loopback
 
@@ -121,9 +108,9 @@ iface $BR inet dhcp
 INNER
 done)
 EOF
-
-ifreload -a 2>/dev/null || systemctl restart networking
-success "Dual DHCP bridges ready"
+    ifreload -a 2>/dev/null || systemctl restart networking
+    success "Dual DHCP bridges ready (SSH has likely dropped)"
+fi
 
 step "PHASE 5 — Netbird"
 curl -fsSL https://pkgs.netbird.io/install.sh | sh
@@ -151,9 +138,8 @@ sed -i 's/#enable-reflector=no/enable-reflector=yes/' /etc/avahi/avahi-daemon.co
 sed -i '/allow-interfaces=/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 echo "allow-interfaces=vmbr0,vmbr1" >> /etc/avahi/avahi-daemon.conf
 systemctl enable --now avahi-daemon
-success "mDNS/Avahi enabled → discover as $(hostname).local"
 
-# Dynamic MOTD (kept exactly as in .03)
+# Dynamic MOTD (unchanged)
 cat > /etc/update-motd.d/99-portable-proxmox << 'MOTD'
 #!/bin/sh
 DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
@@ -176,12 +162,12 @@ cat <<EOF
 → Open Proxmox GUI with any browser on the same network
 EOF
 MOTD
-
 chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
 step "PHASE 8 — Final Verification"
 echo -e "\n${GREEN}🎉 SETUP COMPLETE! (v0.04)${NC}"
-echo "Reboot recommended for full effect."
+echo "If SSH dropped → reconnect to the new DHCP IP shown on your router or use the Proxmox console."
+echo "Run 'pve-portable-status' after reconnecting."
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
