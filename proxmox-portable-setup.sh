@@ -2,22 +2,25 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .05
+# Version .06
 # =====================================================
 
 set -e
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# ── Version Banner (one of the first steps) ─────────────
+# ── Version Banner + Important Warning ─────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   🚀  Portable Proxmox Setup Script  —  v0.05${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.06${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
+echo -e "${YELLOW}SECURITY NOTE: This script adds a hardcoded SSH public key to root.${NC}"
+echo -e "${YELLOW}Only use on trusted/personal devices. Edit/remove if not desired.${NC}\n"
+
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
-success() { echo -e "${GREEN}✅ $1${NC}"; }
-warn() { echo -e "${YELLOW}⚠️  $1${NC}"; }
-error() { echo -e "${RED}❌ $1${NC}"; exit 1; }
+success() { echo -e "${GREEN}Success $1${NC}"; }
+warn() { echo -e "${YELLOW}Warning $1${NC}"; }
+error() { echo -e "${RED}Error $1${NC}"; exit 1; }
 
 # Pre-checks
 [[ $EUID -eq 0 ]] || error "Run as root"
@@ -45,12 +48,12 @@ fi
 apt-get update -qq
 success "Repos configured"
 
-# PHASE 1 — Nag removal (with progress)
+# PHASE 1 — Nag removal
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 if [[ -f "$JS" ]]; then
-    cp "$JS" "${JS}.bak.$(date +%s)"
+    cp "$JS" "${JS}.bak.$(date +%s)" 2>/dev/null || true
     sed -Ezi 's/(Ext\.Msg\.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS"
-    echo "→ Restarting pveproxy (10-60s)..."
+    echo "→ Restarting pveproxy..."
     systemctl stop pveproxy 2>/dev/null || true; sleep 2; pkill -9 -f pveproxy 2>/dev/null || true
     systemctl start pveproxy
     success "Subscription nag removed"
@@ -78,19 +81,28 @@ apt-get install -y htop curl git jq wget
 success "System upgraded"
 
 step "PHASE 4 — Networking (Dual DHCP)"
-echo -e "${RED}⚠️  CRITICAL WARNING — SSH WILL DROP${NC}"
-echo -e "${RED}This will overwrite /etc/network/interfaces and restart networking.${NC}"
-echo -e "${RED}You will lose this SSH session immediately.${NC}"
-echo -e "${RED}Reconnect using the new DHCP IP shown on your router (vmbr0).${NC}"
-read -p "Continue and accept disconnect? (y/N): " CONFIRM
-if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-    warn "Networking skipped — continuing without change"
+# Idempotency check
+if grep -q '^auto vmbr0' /etc/network/interfaces 2>/dev/null && grep -q '^auto vmbr1' /etc/network/interfaces 2>/dev/null; then
+    warn "vmbr0 and vmbr1 already appear in /etc/network/interfaces — skipping network rewrite"
 else
-    cp /etc/network/interfaces /etc/network/interfaces.bak.$(date +%s) 2>/dev/null || true
-    PHYS_NICS=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^(en|eth)' | grep -vE 'veth|br|vmbr|bond')
-    NIC_ARRAY=($PHYS_NICS)
+    echo -e "${RED}Warning CRITICAL WARNING — SSH WILL DROP${NC}"
+    echo -e "${RED}This will overwrite /etc/network/interfaces and apply new config.${NC}"
+    echo -e "${RED}You will lose this SSH session immediately.${NC}"
+    echo -e "${RED}Reconnect using the new DHCP IP on vmbr0 (check your router).${NC}"
+    read -p "Continue and accept disconnect? (y/N): " CONFIRM
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        warn "Networking skipped — continuing without change"
+    else
+        cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
 
-    cat > /etc/network/interfaces <<EOF
+        # Improved NIC detection: modern names (ens, eno, enp, end, enx, etc.)
+        PHYS_NICS=$(ip -o link show up | awk -F': ' '{print $2}' | grep '^e' | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap)' | sort -u)
+        NIC_ARRAY=($PHYS_NICS)
+
+        if [ ${#NIC_ARRAY[@]} -eq 0 ]; then
+            warn "No physical ethernet interfaces detected — skipping bridge creation"
+        else
+            cat > /etc/network/interfaces <<EOF
 auto lo
 iface lo inet loopback
 
@@ -108,15 +120,28 @@ iface $BR inet dhcp
 INNER
 done)
 EOF
-    ifreload -a 2>/dev/null || systemctl restart networking
-    success "Dual DHCP bridges ready (SSH has dropped)"
+            # Apply changes - ifreload is preferred on Proxmox
+            echo "Applying network config..."
+            if command -v ifreload >/dev/null 2>&1; then
+                ifreload -a || true
+            else
+                warn "'ifreload' not found — install ifupdown2 if needed"
+            fi
+
+            warn "Network config applied."
+            warn "If bridges (vmbr0/vmbr1) did not come up:"
+            warn "  → Run 'ifreload -a' manually after reconnect"
+            warn "  → Or reboot the node"
+            success "Dual DHCP bridges configured (SSH likely dropped)"
+        fi
+    fi
 fi
 
 step "PHASE 5 — Netbird"
 curl -fsSL https://pkgs.netbird.io/install.sh | sh
 netbird up --management-url https://netbird.arigonz.com --setup-key "$NETBIRD_KEY"
-sleep 8
-netbird status | grep -q Connected && success "Netbird connected" || error "Netbird failed"
+sleep 12  # Give it a bit more time to settle
+netbird status | grep -q Connected && success "Netbird connected" || warn "Netbird status not Connected — check manually"
 
 step "PHASE 6 — Cloudflared"
 mkdir -p --mode=0755 /usr/share/keyrings
@@ -125,7 +150,7 @@ echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.c
 apt-get update && apt-get install -y cloudflared
 if [[ -n "$CLOUDFLARED_TOKEN" ]]; then
     cloudflared service install "$CLOUDFLARED_TOKEN"
-    success "Cloudflared installed"
+    success "Cloudflared installed & service created"
 fi
 
 step "PHASE 7 — Security + Dynamic MOTD + mDNS"
@@ -142,14 +167,20 @@ cat > /etc/update-motd.d/99-portable-proxmox << 'MOTD'
 #!/bin/sh
 DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
 NETBIRD=$(netbird status 2>/dev/null | grep -oP 'NetBird IP:\s+\K[^\s]+' || echo "Disconnected")
-CF_NAME="Active"
+
+# Improved Cloudflared status
+CF_NAME="Not installed"
 if command -v cloudflared >/dev/null 2>&1; then
-    TUNNEL=$(cloudflared tunnel list 2>/dev/null | awk 'NR==2 {print $2}' || echo "")
-    [[ -n "$TUNNEL" ]] && CF_NAME="$TUNNEL"
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        CF_NAME="Active"
+    else
+        CF_NAME="Installed but not running"
+    fi
 fi
+
 cat <<EOF
 ╔══════════════════════════════════════════════════════════════╗
-║               🚀  PORTABLE PROXMOX HOST                      ║
+║               Portable Proxmox HOST                      ║
 ╟──────────────────────────────────────────────────────────────╢
 ║  Hostname          :  $(hostname)                            ║
 ║  DHCP IP (vmbr0)   :  $DHCP0                                 ║
@@ -163,7 +194,7 @@ chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
 step "PHASE 8 — Final Verification"
-echo -e "\n${GREEN}🎉 SETUP COMPLETE! (v0.05)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.06)${NC}"
 echo "If SSH dropped → reconnect to the new vmbr0 DHCP IP"
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
