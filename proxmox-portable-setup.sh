@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .18
+# Version .21
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.18${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.21${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -68,72 +68,18 @@ echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHgzljgx9gDLlln3EEE/vcPvr9NMz7kLiLraof
 chmod 600 /root/.ssh/authorized_keys
 echo 'alias ll="ls -lrt"' >> /root/.bashrc
 
-step "PHASE 2 — User Input"
+step "PHASE 1 — User Input"
 read -p "Hostname [$(hostname)]: " NEWHOST
 [[ -n "$NEWHOST" ]] && hostnamectl set-hostname "$NEWHOST" && echo "$NEWHOST" > /etc/hostname
 
 
 
-step "PHASE 3 — Proxmox Post-Install"
+step "PHASE 2 — Proxmox Post-Install"
 apt-get full-upgrade -y && apt-get autoremove -y
 apt-get install -y htop curl git jq wget ufw
 success "System upgraded"
 
-step "PHASE 4 — Networking (Dual DHCP)"
-# Idempotency check
-if grep -q '^auto vmbr0' /etc/network/interfaces 2>/dev/null && grep -q '^auto vmbr1' /etc/network/interfaces 2>/dev/null; then
-    warn "vmbr0 and vmbr1 already appear in /etc/network/interfaces — skipping network rewrite"
-else
-    echo -e "${RED}⚠ CRITICAL WARNING — SSH WILL DROP${NC}"
-    echo -e "${RED}This will overwrite /etc/network/interfaces and apply new config.${NC}"
-    echo -e "${RED}You will lose this SSH session immediately.${NC}"
-    echo -e "${RED}Reconnect using the new DHCP IP on vmbr0 (check your router).${NC}"
-    read -p "Continue and accept disconnect? (y/N): " CONFIRM
-    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-        warn "Networking skipped — continuing without change"
-    else
-        cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
-
-        PHYS_NICS=$(ip -o link show up | awk -F': ' '{print $2}' | grep '^e' | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap)' | sort -u)
-        NIC_ARRAY=($PHYS_NICS)
-
-        if [ ${#NIC_ARRAY[@]} -eq 0 ]; then
-            warn "No physical ethernet interfaces detected — skipping bridge creation"
-        else
-            cat > /etc/network/interfaces <<EOF
-auto lo
-iface lo inet loopback
-
-$(for i in "${!NIC_ARRAY[@]}"; do
-    NIC=${NIC_ARRAY[$i]}
-    BR="vmbr$i"
-    cat <<INNER
-auto $BR
-iface $BR inet dhcp
-    bridge-ports $NIC
-    bridge-stp off
-    bridge-fd 0
-    bridge-maxwait 0
-
-INNER
-done)
-EOF
-            if command -v ifreload >/dev/null 2>&1; then
-                ifreload -a || true
-            else
-                warn "'ifreload' not found — install ifupdown2 if needed"
-            fi
-
-            warn "Network config applied."
-            warn "If bridges (vmbr0/vmbr1) did not come up:"
-            warn "  → Run 'ifreload -a' manually after reconnect"
-            warn "  → Or reboot the node"
-            success "Dual DHCP bridges configured (SSH likely dropped)"
-        fi
-    fi
-fi
-
-step "PHASE 5 — Netbird"
+step "PHASE 3 — Netbird"
 if [[ "$NETBIRD_CONNECTED" == true ]]; then
     success "Netbird already connected (IP: ${NETBIRD_IP}) — skipping"
 else
@@ -226,28 +172,28 @@ else
     echo ""
 fi
 
-step "PHASE 6 — Cloudflared"
+step "PHASE 4 — Cloudflared"
 mkdir -p --mode=0755 /usr/share/keyrings
 curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null
 echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' | tee /etc/apt/sources.list.d/cloudflared.list
 apt-get update && apt-get install -y cloudflared
 success "Cloudflared installed — run 'cloudflared service install <token>' to configure tunnel"
 
-step "PHASE 7 — Security + Dynamic MOTD + mDNS"
+step "PHASE 5 — Security + Dynamic MOTD + mDNS"
 # FIX 3: Only enable UFW after confirming Netbird is connected,
 # to avoid locking yourself out of SSH (port 22 is restricted to
 # the Netbird CGNAT subnet 100.64.0.0/10 once UFW is enabled).
 if [[ "$NETBIRD_CONNECTED" == true ]]; then
-    pve-firewall enable
+    pve-firewall start
     ufw --force enable
     ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "Netbird SSH"
     ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird PVE"
     ufw reload
     success "Firewall enabled — SSH and PVE UI restricted to Netbird subnet"
 else
-    warn "Netbird is NOT connected — skipping UFW/pve-firewall enable to avoid SSH lockout"
+    warn "Netbird is NOT connected — skipping UFW/pve-firewall start to avoid SSH lockout"
     warn "Once Netbird is confirmed working, run manually:"
-    warn "  pve-firewall enable"
+    warn "  pve-firewall start"
     warn "  ufw --force enable"
     warn "  ufw allow from 100.64.0.0/10 to any port 22 proto tcp"
     warn "  ufw allow from 100.64.0.0/10 to any port 8006 proto tcp"
@@ -289,7 +235,7 @@ MOTD
 chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
 
-step "PHASE 8 — Subscription Nag Removal"
+step "PHASE 6 — Subscription Nag Removal"
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 if [[ -f "$JS" ]]; then
     cp "$JS" "${JS}.bak.$(date +%s)" 2>/dev/null || true
@@ -299,8 +245,61 @@ else
     warn "proxmoxlib.js not found — skipping nag removal"
 fi
 
-step "PHASE 9 — Final Verification"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.18)${NC}"
+step "PHASE 7 — Networking (Dual DHCP)"
+# Idempotency check
+if grep -q '^auto vmbr0' /etc/network/interfaces 2>/dev/null && grep -q '^auto vmbr1' /etc/network/interfaces 2>/dev/null; then
+    warn "vmbr0 and vmbr1 already appear in /etc/network/interfaces — skipping network rewrite"
+else
+    # Detect all physical NICs — include down and bridge-enslaved ones
+    PHYS_NICS=$(ip -o link show | awk -F': ' '{print $2}' | awk '{print $1}' \
+        | grep -E '^(en|eth|em|eno|ens|enp|enx)' \
+        | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap)' \
+        | sort -u)
+    NIC_ARRAY=($PHYS_NICS)
+
+    # Fallback: read directly from /sys/class/net if ip link found nothing
+    if [ ${#NIC_ARRAY[@]} -eq 0 ]; then
+        PHYS_NICS=$(ls /sys/class/net/ | grep -E '^(en|eth|em|eno|ens|enp|enx)' | sort -u)
+        NIC_ARRAY=($PHYS_NICS)
+    fi
+
+    echo "Detected physical NICs: ${NIC_ARRAY[*]:-none}"
+
+    if [ ${#NIC_ARRAY[@]} -eq 0 ]; then
+        warn "No physical ethernet interfaces detected — skipping bridge creation"
+    else
+        echo -e "${RED}⚠ CRITICAL WARNING — this will rewrite /etc/network/interfaces${NC}"
+        echo -e "${RED}The new config will take effect on reboot.${NC}"
+        read -p "Apply networking config? (y/N): " CONFIRM
+        if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+            warn "Networking skipped — continuing without change"
+        else
+            cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+            cat > /etc/network/interfaces <<EOF
+auto lo
+iface lo inet loopback
+
+$(for i in "${!NIC_ARRAY[@]}"; do
+    NIC=${NIC_ARRAY[$i]}
+    BR="vmbr$i"
+    cat <<INNER
+auto $BR
+iface $BR inet dhcp
+    bridge-ports $NIC
+    bridge-stp off
+    bridge-fd 0
+    bridge-maxwait 0
+
+INNER
+done)
+EOF
+            success "Network config written — bridges will come up on reboot"
+        fi
+    fi
+fi
+
+step "PHASE 8 — Complete"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.21)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
