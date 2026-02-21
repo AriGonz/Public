@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .33
+# Version .34
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.33${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.34${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -353,8 +353,9 @@ HOSTNAME_CFG=""
 [ -f /etc/proxmox-portable/config ] && . /etc/proxmox-portable/config
 
 # ── Netbird ───────────────────────────────────────────────────
-# Active = wt0 interface exists and has a 100.64.x.x IP assigned
-NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' || true)
+# Strip CIDR suffix (/16 etc) from the IP
+NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null \
+    | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' || true)
 if [[ -n "$NETBIRD_IP" ]]; then
     NETBIRD_DISPLAY="${NETBIRD_IP} (Active)"
 else
@@ -373,8 +374,17 @@ if command -v cloudflared >/dev/null 2>&1; then
     if [[ "$CF_RUNNING" == true ]]; then
         CF_URL=""
         [[ -n "$DOMAIN" ]] && CF_URL="https://$(hostname).${DOMAIN}"
-        # Check cloudflared local metrics API — available on localhost:2000 when tunnel is live
-        if curl -sf --max-time 3 http://localhost:2000/metrics >/dev/null 2>&1; then
+
+        # Find the cloudflared metrics port (varies: 2000, 20241, etc.)
+        CF_METRICS_OK=false
+        for port in 2000 20241 2001 8080; do
+            if curl -sf --max-time 2 "http://localhost:${port}/metrics" >/dev/null 2>&1; then
+                CF_METRICS_OK=true
+                break
+            fi
+        done
+
+        if [[ "$CF_METRICS_OK" == true ]]; then
             CF_DISPLAY="${CF_URL:-Active} (Active)"
         else
             CF_DISPLAY="${CF_URL:-Active} (Not active)"
@@ -435,7 +445,10 @@ netbird_active() {
 }
 
 cloudflared_active() {
-    curl -sf --max-time 3 http://localhost:2000/metrics >/dev/null 2>&1
+    for port in 2000 20241 2001 8080; do
+        curl -sf --max-time 2 "http://localhost:${port}/metrics" >/dev/null 2>&1 && return 0
+    done
+    return 1
 }
 
 NETBIRD_OK=false
@@ -556,7 +569,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.33)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.34)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
