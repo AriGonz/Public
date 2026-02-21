@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .28
+# Version .30
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.28${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.30${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -69,8 +69,36 @@ chmod 600 /root/.ssh/authorized_keys
 echo 'alias ll="ls -lrt"' >> /root/.bashrc
 
 step "PHASE 1 — User Input"
-read -p "Hostname [$(hostname)]: " NEWHOST
-[[ -n "$NEWHOST" ]] && hostnamectl set-hostname "$NEWHOST" && echo "$NEWHOST" > /etc/hostname
+
+# Auto-detect FQDN from /etc/hosts (set during Proxmox install as 'pve-00.arigonz.com')
+DETECTED_FQDN=$(grep -v '^#' /etc/hosts | grep -v '^127\.' | grep -v '^::' \
+    | awk '{for(i=2;i<=NF;i++) if($i~/\./) {print $i; exit}}')
+DETECTED_HOST="${DETECTED_FQDN%%.*}"
+DETECTED_DOMAIN="${DETECTED_FQDN#*.}"
+
+if [[ -n "$DETECTED_FQDN" && "$DETECTED_HOST" != "$DETECTED_FQDN" ]]; then
+    echo "Detected FQDN from /etc/hosts: ${DETECTED_FQDN}"
+    read -p "Hostname [${DETECTED_HOST}]: " NEWHOST
+    NEWHOST="${NEWHOST:-$DETECTED_HOST}"
+    read -p "Domain [${DETECTED_DOMAIN}]: " USER_DOMAIN
+    USER_DOMAIN="${USER_DOMAIN:-$DETECTED_DOMAIN}"
+else
+    warn "Could not detect FQDN from /etc/hosts — please enter manually"
+    read -p "Hostname [$(hostname)]: " NEWHOST
+    NEWHOST="${NEWHOST:-$(hostname)}"
+    read -p "Your domain (e.g. arigonz.com): " USER_DOMAIN
+    USER_DOMAIN="${USER_DOMAIN:-}"
+fi
+
+hostnamectl set-hostname "$NEWHOST" && echo "$NEWHOST" > /etc/hostname
+
+# Save to persistent config so boot-time scripts can read it
+mkdir -p /etc/proxmox-portable
+cat > /etc/proxmox-portable/config << EOF
+HOSTNAME=${NEWHOST}
+DOMAIN=${USER_DOMAIN}
+EOF
+success "Detected FQDN: ${NEWHOST}.${USER_DOMAIN} — config saved"
 
 
 
@@ -319,14 +347,24 @@ cat > /usr/local/bin/update-console-issue << 'ISSUE_SCRIPT'
 #!/bin/sh
 DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
 NETBIRD=$(netbird status 2>/dev/null | grep -oP 'NetBird IP:\s+\K[^\s]+' || echo "Disconnected")
+
+# Read saved config
+DOMAIN=""
+if [ -f /etc/proxmox-portable/config ]; then
+    . /etc/proxmox-portable/config
+fi
+
 CF_NAME="Not installed"
+CF_URL=""
 if command -v cloudflared >/dev/null 2>&1; then
     if systemctl is-active --quiet cloudflared 2>/dev/null; then
         CF_NAME="Active"
+        [ -n "$DOMAIN" ] && CF_URL="https://$(hostname).${DOMAIN}"
     else
         CF_NAME="Installed but not running"
     fi
 fi
+
 cat > /etc/issue << EOF
 
 ╔══════════════════════════════════════════════════════════════╗
@@ -335,8 +373,8 @@ cat > /etc/issue << EOF
 ║  Hostname          :  $(hostname)
 ║  DHCP IP (vmbr0)   :  $DHCP0
 ║  Netbird IP        :  $NETBIRD
-║  Cloudflared       :  $CF_NAME
-║  mDNS              :  $(hostname).local:8006
+║  mDNS              :  https://$(hostname).local:8006
+║  Cloudflared       :  ${CF_URL:-$CF_NAME}
 ╚══════════════════════════════════════════════════════════════╝
 
 EOF
@@ -464,7 +502,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.28)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.30)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
