@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .26
+# Version .28
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.26${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.28${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -183,29 +183,13 @@ step "PHASE 5 — Security + Dynamic MOTD + mDNS"
 # Only enable UFW after confirming Netbird is connected,
 # to avoid locking yourself out of SSH.
 if [[ "$NETBIRD_CONNECTED" == true ]]; then
-    # Detect the local LAN subnet from the default route interface
-    LOCAL_SUBNET=$(ip -4 route | grep -E 'proto (kernel|dhcp)' | grep -v '100\.64\.' | awk '{print $1}' | grep '/' | head -1)
-    if [[ -z "$LOCAL_SUBNET" ]]; then
-        # Fallback: derive subnet from the primary IP
-        PRIMARY_IP=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | head -1)
-        LOCAL_SUBNET=$(python3 -c "import ipaddress; n=ipaddress.ip_interface('${PRIMARY_IP}'); print(n.network)" 2>/dev/null || true)
-    fi
-
     pve-firewall start
     ufw --force enable
-    # Allow from Netbird subnet
+    # Permanent: allow from Netbird subnet on any network
     ufw allow from 100.64.0.0/10 to any port 22 proto tcp comment "Netbird SSH"
     ufw allow from 100.64.0.0/10 to any port 8006 proto tcp comment "Netbird PVE"
-    # Allow from local LAN subnet so local IP access still works
-    if [[ -n "$LOCAL_SUBNET" ]]; then
-        ufw allow from "$LOCAL_SUBNET" to any port 22 proto tcp comment "LAN SSH"
-        ufw allow from "$LOCAL_SUBNET" to any port 8006 proto tcp comment "LAN PVE"
-        success "Firewall enabled — access allowed from Netbird (${LOCAL_SUBNET}) and LAN subnets"
-    else
-        warn "Could not detect local subnet — only Netbird access is allowed"
-        success "Firewall enabled — SSH and PVE UI restricted to Netbird subnet"
-    fi
     ufw reload
+    success "Firewall enabled — Netbird rules applied"
 else
     warn "Netbird is NOT connected — skipping UFW/pve-firewall start to avoid SSH lockout"
     warn "Once Netbird is confirmed working, run manually:"
@@ -213,10 +197,78 @@ else
     warn "  ufw --force enable"
     warn "  ufw allow from 100.64.0.0/10 to any port 22 proto tcp"
     warn "  ufw allow from 100.64.0.0/10 to any port 8006 proto tcp"
-    warn "  ufw allow from <your-local-subnet> to any port 22 proto tcp"
-    warn "  ufw allow from <your-local-subnet> to any port 8006 proto tcp"
     warn "  ufw reload"
 fi
+
+# Dynamic LAN UFW refresh — runs on every boot after network is up.
+# Detects the current subnet (works on any network), flushes old LAN rules,
+# and adds fresh rules for ports 22 and 8006 from the current local subnet.
+cat > /usr/local/bin/ufw-lan-refresh << 'LAN_SCRIPT'
+#!/bin/bash
+# Detect current LAN subnet, excluding Netbird CGNAT range
+LOCAL_SUBNET=$(ip -4 route | grep -E 'proto (kernel|dhcp)' \
+    | grep -v '100\.64\.' \
+    | awk '{print $1}' | grep '/' | head -1)
+
+# Fallback: derive from primary global IP
+if [[ -z "$LOCAL_SUBNET" ]]; then
+    PRIMARY_IP=$(ip -4 addr show scope global \
+        | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' \
+        | grep -v '100\.64\.' | head -1)
+    LOCAL_SUBNET=$(python3 -c \
+        "import ipaddress; n=ipaddress.ip_interface('${PRIMARY_IP}'); print(n.network)" \
+        2>/dev/null || true)
+fi
+
+if [[ -z "$LOCAL_SUBNET" ]]; then
+    echo "ufw-lan-refresh: could not detect local subnet, skipping"
+    exit 0
+fi
+
+echo "ufw-lan-refresh: detected subnet $LOCAL_SUBNET"
+
+# Delete all existing LAN rules (tagged with "LAN SSH" / "LAN PVE" comments)
+# UFW doesn't support deleting by comment, so we delete by rule spec
+ufw delete allow from 0.0.0.0/0 to any port 22 proto tcp 2>/dev/null || true
+ufw delete allow from 0.0.0.0/0 to any port 8006 proto tcp 2>/dev/null || true
+# More targeted: remove any non-Netbird rules on ports 22 and 8006
+while IFS= read -r rule_num; do
+    ufw --force delete "$rule_num" 2>/dev/null || true
+done < <(ufw status numbered 2>/dev/null \
+    | grep -E '(22|8006)' \
+    | grep -v '100\.64\.' \
+    | grep -oP '^\[\s*\K[0-9]+' \
+    | sort -rn)
+
+# Add fresh rules for the current subnet
+ufw allow from "$LOCAL_SUBNET" to any port 22 proto tcp comment "LAN SSH"
+ufw allow from "$LOCAL_SUBNET" to any port 8006 proto tcp comment "LAN PVE"
+ufw reload
+
+echo "ufw-lan-refresh: rules updated for $LOCAL_SUBNET"
+LAN_SCRIPT
+chmod +x /usr/local/bin/ufw-lan-refresh
+
+cat > /etc/systemd/system/ufw-lan-refresh.service << 'SVC'
+[Unit]
+Description=Refresh UFW LAN rules for current subnet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/ufw-lan-refresh
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+systemctl daemon-reload
+systemctl enable ufw-lan-refresh
+# Run it now for the current network too
+/usr/local/bin/ufw-lan-refresh
+success "Dynamic LAN UFW refresh configured — will update on every boot"
 
 apt-get install -y avahi-daemon
 sed -i 's/#enable-reflector=no/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
@@ -298,38 +350,47 @@ cat > /etc/systemd/system/getty@tty1.service.d/override.conf << 'SVC'
 ExecStartPre=/usr/local/bin/update-console-issue
 SVC
 
-# Netbird TTY refresh — polls until Netbird connects, then rewrites /etc/issue
-# and redraws tty1 so the IP appears without requiring a login/logout cycle.
+# Netbird TTY refresh — polls until Netbird connects, then restarts getty@tty1
+# which triggers ExecStartPre (update-console-issue) with the real Netbird IP.
 cat > /usr/local/bin/netbird-tty-refresh << 'REFRESH_SCRIPT'
 #!/bin/bash
-# Wait up to 120s for Netbird to connect, checking every 5s
-for i in $(seq 1 24); do
+MAX_WAIT=180  # seconds
+INTERVAL=5
+ELAPSED=0
+
+while [[ $ELAPSED -lt $MAX_WAIT ]]; do
     if netbird status 2>/dev/null | grep -qi "connected"; then
-        # Netbird is up — refresh the issue file and redraw tty1
+        # Netbird is connected — update /etc/issue with real IP
         /usr/local/bin/update-console-issue
-        # Clear tty1 and reprint /etc/issue so it shows without user interaction
-        tty_output=$(cat /etc/issue)
-        clear > /dev/tty1
-        echo "$tty_output" > /dev/tty1
+        # Restart getty@tty1 which will re-run ExecStartPre and redisplay the screen
+        systemctl restart getty@tty1
+        echo "netbird-tty-refresh: TTY1 refreshed with Netbird IP at ${ELAPSED}s"
         exit 0
     fi
-    sleep 5
+    sleep $INTERVAL
+    ELAPSED=$(( ELAPSED + INTERVAL ))
 done
-# Timed out — rewrite issue with whatever we have (Netbird will show Disconnected)
+
+# Timed out — do a final update with whatever state we have
+echo "netbird-tty-refresh: timed out after ${MAX_WAIT}s, refreshing with current state"
 /usr/local/bin/update-console-issue
+systemctl restart getty@tty1
 REFRESH_SCRIPT
 chmod +x /usr/local/bin/netbird-tty-refresh
 
 cat > /etc/systemd/system/netbird-tty-refresh.service << 'SVC'
 [Unit]
 Description=Refresh TTY1 console once Netbird connects
-After=network-online.target netbird.service
+# Run after basic network is up — we poll for Netbird ourselves
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/netbird-tty-refresh
 RemainAfterExit=no
+# Give it enough time to poll the full MAX_WAIT duration
+TimeoutStartSec=240
 
 [Install]
 WantedBy=multi-user.target
@@ -337,7 +398,7 @@ SVC
 
 systemctl daemon-reload
 systemctl enable netbird-tty-refresh
-success "TTY console issue screen configured (will refresh once Netbird connects)"
+success "TTY console issue screen configured (will refresh once Netbird connects, up to 180s)"
 
 step "PHASE 6 — Subscription Nag Removal"
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
@@ -403,7 +464,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.26)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.28)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
