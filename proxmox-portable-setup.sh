@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .34
+# Version .35
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.34${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.35${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -412,16 +412,14 @@ echo "$(date): DHCP=$DHCP0 NETBIRD=$NETBIRD_DISPLAY CF=$CF_DISPLAY" >> /var/log/
 ISSUE_SCRIPT
 chmod +x /usr/local/bin/update-console-issue
 
-# Helper script to redraw tty1 — writes /etc/issue directly to the terminal
-# avoiding systemctl restart throttling issues
+# Helper script to redraw tty1 — writes /etc/issue then restarts getty
+# so the login prompt reappears cleanly underneath.
 cat > /usr/local/bin/redraw-tty1 << 'REDRAW'
 #!/bin/bash
-# Clear tty1 and reprint /etc/issue + login prompt hint
-{
-    printf '\033[H\033[2J'     # ANSI: cursor home + clear screen
-    cat /etc/issue
-    printf '\n'
-} > /dev/tty1
+# Update /etc/issue content first (caller may have already done this)
+# Then restart getty@tty1 — it will run ExecStartPre (update-console-issue)
+# and redisplay /etc/issue followed by the login prompt automatically.
+systemctl restart getty@tty1
 REDRAW
 chmod +x /usr/local/bin/redraw-tty1
 
@@ -569,7 +567,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.34)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.35)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
