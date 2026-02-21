@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .21
+# Version .22
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.21${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.22${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -202,10 +202,13 @@ fi
 
 apt-get install -y avahi-daemon
 sed -i 's/#enable-reflector=no/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
+# Remove interface restriction — avahi will bind to whatever is up at boot time
 sed -i '/allow-interfaces=/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
-echo "allow-interfaces=vmbr0,vmbr1" >> /etc/avahi/avahi-daemon.conf
+sed -i '/deny-interfaces=/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 systemctl enable --now avahi-daemon
+success "Avahi mDNS configured"
 
+# MOTD — shown over SSH
 cat > /etc/update-motd.d/99-portable-proxmox << 'MOTD'
 #!/bin/sh
 DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
@@ -234,6 +237,45 @@ EOF
 MOTD
 chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
+
+# Physical console screen — replaces the Proxmox welcome message on tty
+# Uses a systemd service to write dynamic IPs after network is up
+cat > /usr/local/bin/update-console-issue << 'ISSUE_SCRIPT'
+#!/bin/sh
+DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
+NETBIRD=$(netbird status 2>/dev/null | grep -oP 'NetBird IP:\s+\K[^\s]+' || echo "Disconnected")
+cat > /etc/issue << EOF
+
+╔══════════════════════════════════════════════════════════════╗
+║               Portable Proxmox HOST                          ║
+╟──────────────────────────────────────────────────────────────╢
+║  Hostname          :  $(hostname)
+║  Web UI            :  https://$(hostname).local:8006
+║  DHCP IP (vmbr0)   :  $DHCP0
+║  Netbird IP        :  $NETBIRD
+╚══════════════════════════════════════════════════════════════╝
+
+EOF
+ISSUE_SCRIPT
+chmod +x /usr/local/bin/update-console-issue
+
+cat > /etc/systemd/system/console-issue.service << 'SVC'
+[Unit]
+Description=Update /etc/issue with current network info
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/update-console-issue
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVC
+systemctl daemon-reload
+systemctl enable console-issue
+success "Console issue screen configured"
 
 step "PHASE 6 — Subscription Nag Removal"
 JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
@@ -299,7 +341,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.21)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.22)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
