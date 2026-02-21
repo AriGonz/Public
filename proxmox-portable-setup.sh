@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .30
+# Version .31
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.30${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.31${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -344,22 +344,52 @@ rm -f /etc/motd /etc/motd.tail
 # so the box info always shows fresh IPs at the time the TTY is rendered.
 
 cat > /usr/local/bin/update-console-issue << 'ISSUE_SCRIPT'
-#!/bin/sh
+#!/bin/bash
 DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
-NETBIRD=$(netbird status 2>/dev/null | grep -oP 'NetBird IP:\s+\K[^\s]+' || echo "Disconnected")
+
+# Netbird IP — try multiple output formats across versions
+NETBIRD_STATUS=$(netbird status 2>/dev/null || true)
+NETBIRD=$(echo "$NETBIRD_STATUS" | grep -oP 'NetBird IP:\s*\K[^\s,]+' 2>/dev/null || true)
+if [[ -z "$NETBIRD" ]]; then
+    NETBIRD=$(echo "$NETBIRD_STATUS" | grep -oP 'IP:\s*\K100\.[0-9]+\.[0-9]+\.[0-9]+' 2>/dev/null || true)
+fi
+if [[ -z "$NETBIRD" ]]; then
+    # Fallback: read directly from the wt0 interface
+    NETBIRD=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' || true)
+fi
+NETBIRD="${NETBIRD:-Disconnected}"
 
 # Read saved config
 DOMAIN=""
+HOSTNAME_CFG=""
 if [ -f /etc/proxmox-portable/config ]; then
     . /etc/proxmox-portable/config
 fi
 
-CF_NAME="Not installed"
+# Cloudflared — check service by multiple possible names, fall back to process check
 CF_URL=""
+CF_NAME="Not installed"
 if command -v cloudflared >/dev/null 2>&1; then
-    if systemctl is-active --quiet cloudflared 2>/dev/null; then
-        CF_NAME="Active"
-        [ -n "$DOMAIN" ] && CF_URL="https://$(hostname).${DOMAIN}"
+    CF_RUNNING=false
+    # Try common service names
+    for svc in cloudflared cloudflared.service; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            CF_RUNNING=true
+            break
+        fi
+    done
+    # Fallback: check if the process is running
+    if [[ "$CF_RUNNING" == false ]] && pgrep -x cloudflared >/dev/null 2>&1; then
+        CF_RUNNING=true
+    fi
+
+    if [[ "$CF_RUNNING" == true ]]; then
+        if [[ -n "$DOMAIN" ]]; then
+            CF_URL="https://$(hostname).${DOMAIN}"
+            CF_NAME="$CF_URL"
+        else
+            CF_NAME="Active"
+        fi
     else
         CF_NAME="Installed but not running"
     fi
@@ -374,10 +404,13 @@ cat > /etc/issue << EOF
 ║  DHCP IP (vmbr0)   :  $DHCP0
 ║  Netbird IP        :  $NETBIRD
 ║  mDNS              :  https://$(hostname).local:8006
-║  Cloudflared       :  ${CF_URL:-$CF_NAME}
+║  Cloudflared       :  $CF_NAME
 ╚══════════════════════════════════════════════════════════════╝
 
 EOF
+
+# Log for debugging — check /var/log/console-issue.log if screen looks wrong
+echo "$(date): DHCP=$DHCP0 NETBIRD=$NETBIRD CF=$CF_NAME" >> /var/log/console-issue.log
 ISSUE_SCRIPT
 chmod +x /usr/local/bin/update-console-issue
 
@@ -392,25 +425,33 @@ SVC
 # which triggers ExecStartPre (update-console-issue) with the real Netbird IP.
 cat > /usr/local/bin/netbird-tty-refresh << 'REFRESH_SCRIPT'
 #!/bin/bash
-MAX_WAIT=180  # seconds
+MAX_WAIT=180
 INTERVAL=5
 ELAPSED=0
 
+echo "$(date): netbird-tty-refresh started" >> /var/log/console-issue.log
+
 while [[ $ELAPSED -lt $MAX_WAIT ]]; do
-    if netbird status 2>/dev/null | grep -qi "connected"; then
-        # Netbird is connected — update /etc/issue with real IP
+    NETBIRD_STATUS=$(netbird status 2>/dev/null || true)
+
+    # Check connected via status text OR presence of a 100.x IP on wt0
+    NETBIRD_IP=$(echo "$NETBIRD_STATUS" | grep -oP 'NetBird IP:\s*\K[^\s,]+' || true)
+    [[ -z "$NETBIRD_IP" ]] && NETBIRD_IP=$(echo "$NETBIRD_STATUS" | grep -oP 'IP:\s*\K100\.[0-9]+\.[0-9]+\.[0-9]+' || true)
+    [[ -z "$NETBIRD_IP" ]] && NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' || true)
+
+    if [[ -n "$NETBIRD_IP" ]] || echo "$NETBIRD_STATUS" | grep -qi "connected"; then
+        echo "$(date): Netbird connected (IP=$NETBIRD_IP) at ${ELAPSED}s — refreshing TTY1" >> /var/log/console-issue.log
         /usr/local/bin/update-console-issue
-        # Restart getty@tty1 which will re-run ExecStartPre and redisplay the screen
         systemctl restart getty@tty1
-        echo "netbird-tty-refresh: TTY1 refreshed with Netbird IP at ${ELAPSED}s"
         exit 0
     fi
+
+    echo "$(date): Netbird not yet connected at ${ELAPSED}s" >> /var/log/console-issue.log
     sleep $INTERVAL
     ELAPSED=$(( ELAPSED + INTERVAL ))
 done
 
-# Timed out — do a final update with whatever state we have
-echo "netbird-tty-refresh: timed out after ${MAX_WAIT}s, refreshing with current state"
+echo "$(date): netbird-tty-refresh timed out after ${MAX_WAIT}s" >> /var/log/console-issue.log
 /usr/local/bin/update-console-issue
 systemctl restart getty@tty1
 REFRESH_SCRIPT
@@ -502,7 +543,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.30)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.31)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
