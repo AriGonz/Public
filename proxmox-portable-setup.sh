@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .45
+# Version .46
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.45${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.46${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -176,7 +176,7 @@ apt-get install -y htop curl git jq wget ufw
 curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-net-recover.sh \
     -o /root/pve-net-recover.sh
 chmod +x /root/pve-net-recover.sh
-success "Network recovery script installed — run 'pve-net-recover.sh' if node doesn't pick up IP"
+success "Network recovery script downloaded to /root — run 'bash ~/pve-net-recover.sh' if node doesn't pick up IP"
 
 success "System upgraded"
 
@@ -682,7 +682,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.45)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.46)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
