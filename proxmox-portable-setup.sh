@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .36
+# Version .37
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.36${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.37${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -45,11 +45,18 @@ success "All pre-checks passed"
 
 step "PHASE 0 — Repository Setup"
 
-# Remove invalid .bak files from sources.list.d (left by previous cloudflared installs etc)
-find /etc/apt/sources.list.d/ -name '*.bak*' -o -name '*.bak-*' 2>/dev/null | while read -r f; do
+# Remove invalid .bak files from sources.list.d
+find /etc/apt/sources.list.d/ \( -name '*.bak*' -o -name '*.bak-*' \) 2>/dev/null | while read -r f; do
     warn "Removing invalid apt source file: $f"
     rm -f "$f"
 done
+
+# Detect codename
+PVE_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
+if [[ -z "$PVE_CODENAME" ]]; then
+    PVE_CODENAME="bookworm"
+    warn "Could not detect VERSION_CODENAME — defaulting to bookworm"
+fi
 
 # Disable Proxmox enterprise repos (both .list and .sources formats)
 while IFS= read -r f; do
@@ -59,38 +66,45 @@ while IFS= read -r f; do
         else
             sed -i '/^Types:/i Enabled: no' "$f"
         fi
-        warn "Disabled enterprise repo (sources): $f"
+        warn "Disabled enterprise repo: $f"
     else
         sed -i 's/^deb/#deb/' "$f"
-        warn "Disabled enterprise repo (list): $f"
+        warn "Disabled enterprise repo: $f"
     fi
 done < <(grep -rl enterprise.proxmox.com /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null || true)
 
-# Add no-subscription repo if not already present
-PVE_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
-if [[ -z "$PVE_CODENAME" ]]; then
-    PVE_CODENAME="bookworm"
-    warn "Could not detect VERSION_CODENAME — defaulting to bookworm"
-fi
-NO_SUB_LINE="deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription"
-if ! grep -qF "pve-no-subscription" /etc/apt/sources.list 2>/dev/null; then
-    echo "$NO_SUB_LINE" >> /etc/apt/sources.list
+# Check ALL sources for pve-no-subscription (including .sources format files)
+NO_SUB_PRESENT=$(grep -r 'pve-no-subscription' \
+    /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | grep -v '^#' || true)
+if [[ -z "$NO_SUB_PRESENT" ]]; then
+    echo "deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription" \
+        >> /etc/apt/sources.list
     success "Added no-subscription repo for ${PVE_CODENAME}"
 else
     success "No-subscription repo already present"
 fi
 
-# Update and verify — abort if basic packages still can't be found
+# Ensure standard Debian repos are present (needed for htop, git, jq, ufw etc)
+DEBIAN_MAIN="deb http://deb.debian.org/debian ${PVE_CODENAME} main contrib"
+DEBIAN_SEC="deb http://deb.debian.org/debian-security ${PVE_CODENAME}-security main contrib"
+DEBIAN_UPD="deb http://deb.debian.org/debian ${PVE_CODENAME}-updates main contrib"
+for line in "$DEBIAN_MAIN" "$DEBIAN_SEC" "$DEBIAN_UPD"; do
+    keyword=$(echo "$line" | awk '{print $3}')
+    if ! grep -rqF "$keyword" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+        echo "$line" >> /etc/apt/sources.list
+        success "Added Debian repo: $keyword"
+    fi
+done
+
+# Update and verify
 apt-get update -qq
 if ! apt-cache show curl >/dev/null 2>&1; then
-    echo ""
-    warn "apt-get update ran but 'curl' is still not found."
     warn "Current sources:"
     cat /etc/apt/sources.list
     ls /etc/apt/sources.list.d/
-    die "Repo setup failed — cannot continue. Fix sources manually and re-run."
+    die "Repo setup failed — curl still not found. Fix sources manually and re-run."
 fi
-success "Repos configured and verified"
+success "Repos configured and verified (${PVE_CODENAME})"
 
 
 mkdir -p /root/.ssh
@@ -597,7 +611,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.36)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.37)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
