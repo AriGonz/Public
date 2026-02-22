@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .39
+# Version .40
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.39${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.40${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -632,10 +632,14 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.39)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.40)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
 fi
+echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
+echo -e "${BLUE}  To run on the next node, use:${NC}"
+echo -e "${CYAN}  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)\"${NC}"
+echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
