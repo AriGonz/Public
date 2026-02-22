@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .49
+# Version .50
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.49${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.50${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -480,30 +480,34 @@ success "Avahi mDNS configured (IPv4 only)"
 
 # MOTD — shown over SSH
 cat > /etc/update-motd.d/99-portable-proxmox << 'MOTD'
-#!/bin/sh
-DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
-NETBIRD=$(netbird status 2>/dev/null | grep -oP 'NetBird IP:\s+\K[^\s]+' || echo "Disconnected")
+#!/bin/bash
+# Collect one line per active bridge
+BRIDGE_LINES=""
+for br in vmbr0 vmbr1 vmbr2 vmbr3; do
+    IP=$(ip -4 addr show "$br" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
+    [[ -n "$IP" ]] && BRIDGE_LINES="${BRIDGE_LINES}║  DHCP IP (${br})   :  ${IP}:8006\n"
+done
+[[ -z "$BRIDGE_LINES" ]] && BRIDGE_LINES="║  DHCP IP (vmbr0)   :  None\n"
+
+NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null \
+    | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+NETBIRD="${NETBIRD_IP:-Disconnected}"
 
 CF_NAME="Not installed"
 if command -v cloudflared >/dev/null 2>&1; then
-    if systemctl is-active --quiet cloudflared 2>/dev/null; then
-        CF_NAME="Active"
-    else
-        CF_NAME="Installed but not running"
-    fi
+    systemctl is-active --quiet cloudflared 2>/dev/null \
+        && CF_NAME="Active" || CF_NAME="Installed but not running"
 fi
 
-cat <<EOF
-╔══════════════════════════════════════════════════════════════╗
-║               Portable Proxmox HOST                          ║
-╟──────────────────────────────────────────────────────────────╢
-║  Hostname          :  $(hostname)
-║  DHCP IP (vmbr0)   :  $DHCP0
-║  Netbird IP        :  $NETBIRD
-║  Cloudflared       :  $CF_NAME
-║  mDNS              :  $(hostname).local:8006
-╚══════════════════════════════════════════════════════════════╝
-EOF
+printf "╔══════════════════════════════════════════════════════════════╗\n"
+printf "║               Portable Proxmox HOST                          ║\n"
+printf "╟──────────────────────────────────────────────────────────────╢\n"
+printf "║  Hostname          :  %s:8006\n" "$(hostname)"
+printf "%b" "$BRIDGE_LINES"
+printf "║  Netbird IP        :  %s\n" "$NETBIRD"
+printf "║  Cloudflared       :  %s\n" "$CF_NAME"
+printf "║  mDNS              :  https://%s.local:8006\n" "$(hostname)"
+printf "╚══════════════════════════════════════════════════════════════╝\n"
 MOTD
 chmod +x /etc/update-motd.d/99-portable-proxmox
 rm -f /etc/motd /etc/motd.tail
@@ -520,19 +524,20 @@ DOMAIN=""
 HOSTNAME_CFG=""
 [ -f /etc/proxmox-portable/config ] && . /etc/proxmox-portable/config
 
-# ── DHCP IP — try vmbr0 first, fall back to any bridge with an IP ─────────────
-DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
-if [[ -z "$DHCP0" ]]; then
-    # vmbr0 has no IP — check other bridges
-    for br in vmbr1 vmbr2; do
-        DHCP0=$(ip -4 addr show "$br" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
-        [[ -n "$DHCP0" ]] && DHCP0="${DHCP0} (${br})" && break
-    done
-fi
-DHCP0="${DHCP0:-None}"
+# ── DHCP IPs — collect one line per active bridge that has an IP ──────────────
+BRIDGE_LINES=""
+for br in vmbr0 vmbr1 vmbr2 vmbr3; do
+    IP=$(ip -4 addr show "$br" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
+    if [[ -n "$IP" ]]; then
+        BRIDGE_LINES="${BRIDGE_LINES}║  DHCP IP (${br})   :  ${IP}:8006\n"
+    fi
+done
+# If no bridge has an IP at all, show one placeholder line
+[[ -z "$BRIDGE_LINES" ]] && BRIDGE_LINES="║  DHCP IP (vmbr0)   :  None\n"
 
 # ── Netbird — strip CIDR suffix (/16 etc) using -oP to stop at last digit ────
-NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null     | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
+NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null \
+    | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
 if [[ -n "$NETBIRD_IP" ]]; then
     NETBIRD_DISPLAY="${NETBIRD_IP} (Active)"
 else
@@ -571,21 +576,22 @@ if command -v cloudflared >/dev/null 2>&1; then
     fi
 fi
 
-cat > /etc/issue << EOF
+# ── Build /etc/issue ──────────────────────────────────────────
+{
+printf "\n"
+printf "╔══════════════════════════════════════════════════════════════╗\n"
+printf "║               Portable Proxmox HOST                          ║\n"
+printf "╟──────────────────────────────────────────────────────────────╢\n"
+printf "║  Hostname          :  %s:8006\n" "$(hostname)"
+printf "%b" "$BRIDGE_LINES"
+printf "║  Netbird IP        :  %s\n" "$NETBIRD_DISPLAY"
+printf "║  mDNS              :  https://%s.local:8006\n" "$(hostname)"
+printf "║  Cloudflared       :  %s\n" "$CF_DISPLAY"
+printf "╚══════════════════════════════════════════════════════════════╝\n"
+printf "\n"
+} > /etc/issue
 
-╔══════════════════════════════════════════════════════════════╗
-║               Portable Proxmox HOST                          ║
-╟──────────────────────────────────────────────────────────────╢
-║  Hostname          :  $(hostname)
-║  DHCP IP (vmbr0)   :  $DHCP0
-║  Netbird IP        :  $NETBIRD_DISPLAY
-║  mDNS              :  https://$(hostname).local:8006
-║  Cloudflared       :  $CF_DISPLAY
-╚══════════════════════════════════════════════════════════════╝
-
-EOF
-
-echo "$(date): DHCP=$DHCP0 NETBIRD=$NETBIRD_DISPLAY CF=$CF_DISPLAY" >> /var/log/console-issue.log
+echo "$(date): BRIDGES=$(echo -e "$BRIDGE_LINES" | tr '\n' '|') NETBIRD=$NETBIRD_DISPLAY CF=$CF_DISPLAY" >> /var/log/console-issue.log
 ISSUE_SCRIPT
 chmod +x /usr/local/bin/update-console-issue
 
@@ -755,7 +761,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.49)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.50)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
