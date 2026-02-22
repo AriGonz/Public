@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .50
+# Version .52
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.50${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.52${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -361,42 +361,49 @@ cat > /usr/local/bin/ufw-lan-refresh << 'LAN_SCRIPT'
 LOG=/var/log/ufw-lan-refresh.log
 echo "$(date): ufw-lan-refresh started" >> "$LOG"
 
-# Wait for DHCP to assign an IP — retry for up to 30s
-# network-online.target can fire before DHCP completes on a new network
-LOCAL_SUBNET=""
+# Wait for DHCP to assign at least one IP across any bridge — retry up to 60s
+SUBNETS=""
 for attempt in $(seq 1 12); do
-    # Method 1: kernel/dhcp route
-    LOCAL_SUBNET=$(ip -4 route 2>/dev/null \
-        | grep -E 'proto (kernel|dhcp)' \
-        | grep -v '100\.64\.' \
-        | awk '{print $1}' | grep '/' | head -1)
+    SUBNETS=""
 
-    # Method 2: derive from global IP if route not yet present
-    if [[ -z "$LOCAL_SUBNET" ]]; then
-        PRIMARY_IP=$(ip -4 addr show scope global 2>/dev/null \
-            | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' \
-            | grep -v '100\.64\.' | head -1)
-        if [[ -n "$PRIMARY_IP" ]]; then
-            LOCAL_SUBNET=$(python3 -c \
-                "import ipaddress; n=ipaddress.ip_interface('${PRIMARY_IP}'); print(n.network)" \
-                2>/dev/null || true)
+    # Collect subnets from all active bridges (vmbr0, vmbr1, etc.)
+    for br in vmbr0 vmbr1 vmbr2 vmbr3; do
+        ip link show "$br" >/dev/null 2>&1 || continue
+        # Method 1: kernel/dhcp route for this bridge
+        SUBNET=$(ip -4 route 2>/dev/null \
+            | grep -E 'proto (kernel|dhcp)' \
+            | grep "dev ${br}" \
+            | grep -v '100\.64\.' \
+            | awk '{print $1}' | grep '/' | head -1)
+        # Method 2: derive from IP assigned to bridge
+        if [[ -z "$SUBNET" ]]; then
+            BR_IP=$(ip -4 addr show "$br" 2>/dev/null \
+                | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' \
+                | grep -v '100\.64\.' | head -1)
+            if [[ -n "$BR_IP" ]]; then
+                SUBNET=$(python3 -c \
+                    "import ipaddress; n=ipaddress.ip_interface('${BR_IP}'); print(n.network)" \
+                    2>/dev/null || true)
+            fi
         fi
-    fi
+        if [[ -n "$SUBNET" ]]; then
+            SUBNETS="${SUBNETS} ${SUBNET}"
+            echo "$(date): found subnet $SUBNET on $br" >> "$LOG"
+        fi
+    done
 
-    [[ -n "$LOCAL_SUBNET" ]] && break
+    [[ -n "$SUBNETS" ]] && break
     echo "$(date): attempt $attempt — waiting for DHCP..." >> "$LOG"
     sleep 5
 done
 
-if [[ -z "$LOCAL_SUBNET" ]]; then
-    echo "$(date): could not detect local subnet after retries — giving up" >> "$LOG"
+if [[ -z "$SUBNETS" ]]; then
+    echo "$(date): could not detect any subnet after retries — giving up" >> "$LOG"
     exit 1
 fi
 
-echo "$(date): detected subnet $LOCAL_SUBNET" >> "$LOG"
-
-# Delete all existing non-Netbird rules on ports 22 and 8006.
-# Re-query rule numbers each iteration because they shift after every delete.
+# Delete all existing non-Netbird LAN rules on ports 22 and 8006.
+# Re-query rule numbers after each delete since they shift.
 for port in 22 8006; do
     while true; do
         rule_num=$(ufw status numbered 2>/dev/null \
@@ -410,12 +417,15 @@ for port in 22 8006; do
     done
 done
 
-# Add fresh rules for the current subnet
-ufw allow from "$LOCAL_SUBNET" to any port 22 proto tcp comment "LAN SSH"
-ufw allow from "$LOCAL_SUBNET" to any port 8006 proto tcp comment "LAN PVE"
+# Add fresh rules for every detected subnet
+for SUBNET in $SUBNETS; do
+    ufw allow from "$SUBNET" to any port 22 proto tcp comment "LAN SSH"
+    ufw allow from "$SUBNET" to any port 8006 proto tcp comment "LAN PVE"
+    echo "$(date): added rules for $SUBNET" >> "$LOG"
+done
 ufw reload
 
-echo "$(date): rules updated for $LOCAL_SUBNET" >> "$LOG"
+echo "$(date): rules updated for:$SUBNETS" >> "$LOG"
 LAN_SCRIPT
 chmod +x /usr/local/bin/ufw-lan-refresh
 
@@ -524,15 +534,20 @@ DOMAIN=""
 HOSTNAME_CFG=""
 [ -f /etc/proxmox-portable/config ] && . /etc/proxmox-portable/config
 
-# ── DHCP IPs — collect one line per active bridge that has an IP ──────────────
+# ── DHCP IPs — one line per active bridge, test :8006 connectivity ───────────
 BRIDGE_LINES=""
 for br in vmbr0 vmbr1 vmbr2 vmbr3; do
     IP=$(ip -4 addr show "$br" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
     if [[ -n "$IP" ]]; then
-        BRIDGE_LINES="${BRIDGE_LINES}║  DHCP IP (${br})   :  ${IP}:8006\n"
+        # Test TCP connection to port 8006 — 2s timeout
+        if curl -sk --max-time 2 "https://${IP}:8006" >/dev/null 2>&1; then
+            STATUS="Active"
+        else
+            STATUS="Not reachable"
+        fi
+        BRIDGE_LINES="${BRIDGE_LINES}║  DHCP IP (${br})   :  ${IP}:8006 (${STATUS})\n"
     fi
 done
-# If no bridge has an IP at all, show one placeholder line
 [[ -z "$BRIDGE_LINES" ]] && BRIDGE_LINES="║  DHCP IP (vmbr0)   :  None\n"
 
 # ── Netbird — strip CIDR suffix (/16 etc) using -oP to stop at last digit ────
@@ -761,7 +776,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.50)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.52)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
