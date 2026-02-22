@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .40
+# Version .41
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.40${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.41${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -174,8 +174,21 @@ success "System upgraded"
 
 step "PHASE 3 — Netbird"
 if [[ "$NETBIRD_CONNECTED" == true ]]; then
-    success "Netbird already connected (IP: ${NETBIRD_IP}) — skipping"
+    echo ""
+    read -p "$(echo -e "${BYELLOW}${BOLD}Netbird is already connected (${NETBIRD_IP}). Re-authorize this node? (y/N): ${NC}")" REAUTH
+    if [[ ! "${REAUTH,,}" =~ ^y$ ]]; then
+        success "Netbird already connected (IP: ${NETBIRD_IP}) — skipping"
+    else
+        NETBIRD_CONNECTED=false  # Reset so firewall/UFW phase runs correctly later
+        warn "Re-authorizing Netbird on this node..."
+        netbird down 2>/dev/null || true
+        NETBIRD_DO_SETUP=true
+    fi
 else
+    NETBIRD_DO_SETUP=true
+fi
+
+if [[ "${NETBIRD_DO_SETUP:-false}" == true ]]; then
     curl -fsSL https://pkgs.netbird.io/install.sh | sh
 
     echo -e "Connecting to Netbird management server..."
@@ -244,7 +257,6 @@ else
         while true; do
             read -p "$(echo -e "${BYELLOW}${BOLD}Have you authorized the device at the URL above? (y/n): ${NC}")" USER_ANSWER
             if [[ "${USER_ANSWER,,}" == "y" ]]; then
-                # Give it a few more seconds and check again
                 echo -e "${BYELLOW}${BOLD}⏳ Checking connection...${NC}"
                 for i in {1..10}; do
                     if check_netbird; then
@@ -632,7 +644,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.40)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.41)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
