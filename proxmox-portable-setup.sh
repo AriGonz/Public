@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .47
+# Version .48
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.47${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.48${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -460,17 +460,25 @@ rm -f /etc/motd /etc/motd.tail
 
 cat > /usr/local/bin/update-console-issue << 'ISSUE_SCRIPT'
 #!/bin/bash
-DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || echo "None")
 
 # Read saved config
 DOMAIN=""
 HOSTNAME_CFG=""
 [ -f /etc/proxmox-portable/config ] && . /etc/proxmox-portable/config
 
-# ── Netbird ───────────────────────────────────────────────────
-# Strip CIDR suffix (/16 etc) from the IP
-NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null \
-    | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' || true)
+# ── DHCP IP — try vmbr0 first, fall back to any bridge with an IP ─────────────
+DHCP0=$(ip -4 addr show vmbr0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
+if [[ -z "$DHCP0" ]]; then
+    # vmbr0 has no IP — check other bridges
+    for br in vmbr1 vmbr2; do
+        DHCP0=$(ip -4 addr show "$br" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
+        [[ -n "$DHCP0" ]] && DHCP0="${DHCP0} (${br})" && break
+    done
+fi
+DHCP0="${DHCP0:-None}"
+
+# ── Netbird — strip CIDR suffix (/16 etc) using -oP to stop at last digit ────
+NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null     | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
 if [[ -n "$NETBIRD_IP" ]]; then
     NETBIRD_DISPLAY="${NETBIRD_IP} (Active)"
 else
@@ -693,7 +701,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.47)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.48)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
