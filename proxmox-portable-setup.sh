@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .48
+# Version .49
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.48${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.49${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -127,6 +127,35 @@ if ! apt-cache show htop >/dev/null 2>&1; then
     die "Repo setup failed — Debian packages not found. Fix sources manually and re-run."
 fi
 success "Repos configured and verified (${PVE_CODENAME})"
+
+# ── Network connectivity check ───────────────────────────────
+step "PHASE 0.5 — Network Connectivity Check"
+GW=$(ip route | grep '^default' | awk '{print $3}' | head -1 || true)
+if [[ -n "$GW" ]]; then
+    success "Default gateway : $GW"
+else
+    warn "No default gateway detected — DHCP may not have completed"
+fi
+
+PING_OK=true
+for host in 1.1.1.1 8.8.8.8; do
+    if ping -c2 -W3 "$host" >/dev/null 2>&1; then
+        success "Ping $host        : OK"
+    else
+        warn    "Ping $host        : FAILED"
+        PING_OK=false
+    fi
+done
+
+if [[ "$PING_OK" == false ]]; then
+    echo ""
+    warn "Internet connectivity check failed."
+    warn "The script will continue but package installs and service downloads may fail."
+    warn "If this node was just moved to a new network, run: bash ~/pve-net-recover.sh"
+    echo ""
+    read -rp "$(echo -e "${YELLOW}Continue anyway? (y/N): ${NC}")" NET_CONTINUE
+    [[ "${NET_CONTINUE,,}" != "y" ]] && die "Aborted — fix network connectivity and re-run"
+fi
 
 
 mkdir -p /root/.ssh
@@ -389,6 +418,31 @@ ufw reload
 echo "$(date): rules updated for $LOCAL_SUBNET" >> "$LOG"
 LAN_SCRIPT
 chmod +x /usr/local/bin/ufw-lan-refresh
+
+# Boot service — runs pve-net-recover.sh on every reboot to ensure DHCP lease
+# is acquired before ufw-lan-refresh tries to detect the subnet.
+cat > /etc/systemd/system/pve-net-boot.service << 'SVC'
+[Unit]
+Description=Proxmox Portable — DHCP renewal and network recovery on boot
+After=network.target
+Before=ufw-lan-refresh.service netbird-tty-refresh.service
+Wants=network.target
+
+[Service]
+Type=oneshot
+# Run non-interactively — skip prompts, just do DHCP + UFW, no user input
+ExecStart=/bin/bash -c '/root/pve-net-recover.sh --auto 2>&1 | tee -a /var/log/pve-net-boot.log'
+RemainAfterExit=no
+# Allow enough time for DHCP retry loop (up to 60s) plus fixes
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target
+SVC
+
+systemctl daemon-reload
+systemctl enable pve-net-boot.service
+success "pve-net-boot service enabled — will run DHCP renewal on every reboot"
 
 cat > /etc/systemd/system/ufw-lan-refresh.service << 'SVC'
 [Unit]
@@ -701,7 +755,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.48)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.49)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
