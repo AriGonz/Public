@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .37
+# Version .38
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.37${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.38${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -73,34 +73,50 @@ while IFS= read -r f; do
     fi
 done < <(grep -rl enterprise.proxmox.com /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null || true)
 
-# Check ALL sources for pve-no-subscription (including .sources format files)
-NO_SUB_PRESENT=$(grep -r 'pve-no-subscription' \
-    /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | grep -v '^#' || true)
-if [[ -z "$NO_SUB_PRESENT" ]]; then
+# Handle pve-no-subscription:
+# If proxmox.sources already has it, remove any duplicate from sources.list to avoid warnings
+if grep -ql 'pve-no-subscription' /etc/apt/sources.list.d/*.sources 2>/dev/null; then
+    # Remove the line from sources.list if present there too
+    sed -i '/pve-no-subscription/d' /etc/apt/sources.list 2>/dev/null || true
+    success "No-subscription repo present in proxmox.sources (cleaned up sources.list duplicate)"
+elif ! grep -qF 'pve-no-subscription' /etc/apt/sources.list 2>/dev/null; then
     echo "deb http://download.proxmox.com/debian/pve ${PVE_CODENAME} pve-no-subscription" \
         >> /etc/apt/sources.list
     success "Added no-subscription repo for ${PVE_CODENAME}"
 else
-    success "No-subscription repo already present"
+    success "No-subscription repo already present in sources.list"
 fi
 
 # Ensure standard Debian repos are present (needed for htop, git, jq, ufw etc)
-DEBIAN_MAIN="deb http://deb.debian.org/debian ${PVE_CODENAME} main contrib"
-DEBIAN_SEC="deb http://deb.debian.org/debian-security ${PVE_CODENAME}-security main contrib"
-DEBIAN_UPD="deb http://deb.debian.org/debian ${PVE_CODENAME}-updates main contrib"
-for line in "$DEBIAN_MAIN" "$DEBIAN_SEC" "$DEBIAN_UPD"; do
-    keyword=$(echo "$line" | awk '{print $3}')
-    if ! grep -rqF "$keyword" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+# trixie (Debian 13 testing) uses different repo structure — no -security or -updates suites yet
+if [[ "$PVE_CODENAME" == "trixie" ]]; then
+    DEBIAN_REPOS=(
+        "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware"
+        "deb http://deb.debian.org/debian trixie-updates main contrib"
+        "deb http://deb.debian.org/debian-security trixie-security main contrib"
+    )
+else
+    DEBIAN_REPOS=(
+        "deb http://deb.debian.org/debian ${PVE_CODENAME} main contrib"
+        "deb http://deb.debian.org/debian-security ${PVE_CODENAME}-security main contrib"
+        "deb http://deb.debian.org/debian ${PVE_CODENAME}-updates main contrib"
+    )
+fi
+for line in "${DEBIAN_REPOS[@]}"; do
+    # Use the suite name (3rd field) as the uniqueness key
+    suite=$(echo "$line" | awk '{print $3}')
+    if ! grep -rqF "$suite" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
         echo "$line" >> /etc/apt/sources.list
-        success "Added Debian repo: $keyword"
+        success "Added Debian repo: $suite"
     fi
 done
 
 # Update and verify
 apt-get update -qq
 if ! apt-cache show curl >/dev/null 2>&1; then
-    warn "Current sources:"
+    warn "Current /etc/apt/sources.list:"
     cat /etc/apt/sources.list
+    warn "Files in sources.list.d:"
     ls /etc/apt/sources.list.d/
     die "Repo setup failed — curl still not found. Fix sources manually and re-run."
 fi
@@ -611,7 +627,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.37)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.38)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
