@@ -174,8 +174,8 @@ apt-get install -y htop curl git jq wget ufw
 
 # Download network recovery script
 curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-net-recover.sh \
-    -o /usr/local/bin/pve-net-recover.sh
-chmod +x /usr/local/bin/pve-net-recover.sh
+    -o /root/pve-net-recover.sh
+chmod +x /root/pve-net-recover.sh
 success "Network recovery script installed — run 'pve-net-recover.sh' if node doesn't pick up IP"
 
 success "System upgraded"
