@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .43
+# Version .44
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.43${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.44${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -322,47 +322,64 @@ fi
 # and adds fresh rules for ports 22 and 8006 from the current local subnet.
 cat > /usr/local/bin/ufw-lan-refresh << 'LAN_SCRIPT'
 #!/bin/bash
-# Detect current LAN subnet, excluding Netbird CGNAT range
-LOCAL_SUBNET=$(ip -4 route | grep -E 'proto (kernel|dhcp)' \
-    | grep -v '100\.64\.' \
-    | awk '{print $1}' | grep '/' | head -1)
+LOG=/var/log/ufw-lan-refresh.log
+echo "$(date): ufw-lan-refresh started" >> "$LOG"
 
-# Fallback: derive from primary global IP
+# Wait for DHCP to assign an IP — retry for up to 30s
+# network-online.target can fire before DHCP completes on a new network
+LOCAL_SUBNET=""
+for attempt in $(seq 1 12); do
+    # Method 1: kernel/dhcp route
+    LOCAL_SUBNET=$(ip -4 route 2>/dev/null \
+        | grep -E 'proto (kernel|dhcp)' \
+        | grep -v '100\.64\.' \
+        | awk '{print $1}' | grep '/' | head -1)
+
+    # Method 2: derive from global IP if route not yet present
+    if [[ -z "$LOCAL_SUBNET" ]]; then
+        PRIMARY_IP=$(ip -4 addr show scope global 2>/dev/null \
+            | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' \
+            | grep -v '100\.64\.' | head -1)
+        if [[ -n "$PRIMARY_IP" ]]; then
+            LOCAL_SUBNET=$(python3 -c \
+                "import ipaddress; n=ipaddress.ip_interface('${PRIMARY_IP}'); print(n.network)" \
+                2>/dev/null || true)
+        fi
+    fi
+
+    [[ -n "$LOCAL_SUBNET" ]] && break
+    echo "$(date): attempt $attempt — waiting for DHCP..." >> "$LOG"
+    sleep 5
+done
+
 if [[ -z "$LOCAL_SUBNET" ]]; then
-    PRIMARY_IP=$(ip -4 addr show scope global \
-        | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' \
-        | grep -v '100\.64\.' | head -1)
-    LOCAL_SUBNET=$(python3 -c \
-        "import ipaddress; n=ipaddress.ip_interface('${PRIMARY_IP}'); print(n.network)" \
-        2>/dev/null || true)
+    echo "$(date): could not detect local subnet after retries — giving up" >> "$LOG"
+    exit 1
 fi
 
-if [[ -z "$LOCAL_SUBNET" ]]; then
-    echo "ufw-lan-refresh: could not detect local subnet, skipping"
-    exit 0
-fi
+echo "$(date): detected subnet $LOCAL_SUBNET" >> "$LOG"
 
-echo "ufw-lan-refresh: detected subnet $LOCAL_SUBNET"
-
-# Delete all existing LAN rules (tagged with "LAN SSH" / "LAN PVE" comments)
-# UFW doesn't support deleting by comment, so we delete by rule spec
-ufw delete allow from 0.0.0.0/0 to any port 22 proto tcp 2>/dev/null || true
-ufw delete allow from 0.0.0.0/0 to any port 8006 proto tcp 2>/dev/null || true
-# More targeted: remove any non-Netbird rules on ports 22 and 8006
-while IFS= read -r rule_num; do
-    ufw --force delete "$rule_num" 2>/dev/null || true
-done < <(ufw status numbered 2>/dev/null \
-    | grep -E '(22|8006)' \
-    | grep -v '100\.64\.' \
-    | grep -oP '^\[\s*\K[0-9]+' \
-    | sort -rn)
+# Delete all existing non-Netbird rules on ports 22 and 8006.
+# Re-query rule numbers each iteration because they shift after every delete.
+for port in 22 8006; do
+    while true; do
+        rule_num=$(ufw status numbered 2>/dev/null \
+            | grep -E "^\[ *[0-9]+\].*${port}" \
+            | grep -v '100\.64\.' \
+            | grep -oP '^\[\s*\K[0-9]+' \
+            | sort -rn | head -1)
+        [[ -z "$rule_num" ]] && break
+        ufw --force delete "$rule_num" 2>/dev/null && \
+            echo "$(date): deleted rule $rule_num (port $port)" >> "$LOG" || break
+    done
+done
 
 # Add fresh rules for the current subnet
 ufw allow from "$LOCAL_SUBNET" to any port 22 proto tcp comment "LAN SSH"
 ufw allow from "$LOCAL_SUBNET" to any port 8006 proto tcp comment "LAN PVE"
 ufw reload
 
-echo "ufw-lan-refresh: rules updated for $LOCAL_SUBNET"
+echo "$(date): rules updated for $LOCAL_SUBNET" >> "$LOG"
 LAN_SCRIPT
 chmod +x /usr/local/bin/ufw-lan-refresh
 
@@ -376,6 +393,8 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/bin/ufw-lan-refresh
 RemainAfterExit=no
+# Allow up to 90s for DHCP retry loop (12 attempts x 5s = 60s + buffer)
+TimeoutStartSec=90
 
 [Install]
 WantedBy=multi-user.target
@@ -656,7 +675,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.43)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.44)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
