@@ -5,12 +5,12 @@
 # Checks everything, applies fixes, logs all details.
 #
 # Usage:  bash pve-net-recover.sh
-# Log:    /var/log/pve-net-recover.log
+# Log:    /root/pve-net-recover.log
 # ============================================================
 
 set -euo pipefail
 
-LOG=/var/log/pve-net-recover.log
+LOG=/root/pve-net-recover.log
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
