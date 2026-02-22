@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .46
+# Version .47
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.46${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.47${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -629,20 +629,31 @@ else
 fi
 
 step "PHASE 7 — Networking (Dual DHCP)"
-# Idempotency check
-if grep -q '^auto vmbr0' /etc/network/interfaces 2>/dev/null && grep -q '^auto vmbr1' /etc/network/interfaces 2>/dev/null; then
-    warn "vmbr0 and vmbr1 already appear in /etc/network/interfaces — skipping network rewrite"
-else
-    # Detect all physical NICs — include down and bridge-enslaved ones
+# Check if already configured correctly (both bridges present AND vmbr0 is DHCP)
+VMBR0_TYPE=$(grep -A2 'iface vmbr0' /etc/network/interfaces 2>/dev/null | grep 'inet' | awk '{print $3}' || echo "missing")
+if grep -q '^auto vmbr0' /etc/network/interfaces 2>/dev/null \
+    && grep -q '^auto vmbr1' /etc/network/interfaces 2>/dev/null \
+    && [[ "$VMBR0_TYPE" == "dhcp" ]]; then
+    warn "vmbr0 and vmbr1 already configured as DHCP — skipping network rewrite"
+elif [[ "$VMBR0_TYPE" == "static" ]]; then
+    warn "vmbr0 is STATIC — will rewrite to DHCP so node picks up IP on any network"
+fi
+
+if ! { grep -q '^auto vmbr0' /etc/network/interfaces 2>/dev/null \
+    && grep -q '^auto vmbr1' /etc/network/interfaces 2>/dev/null \
+    && [[ "$VMBR0_TYPE" == "dhcp" ]]; }; then
+    # Detect physical NICs by EXCLUDING known virtual interfaces rather than
+    # allowlisting by prefix — handles non-standard names like nic0, nic1 etc.
     PHYS_NICS=$(ip -o link show | awk -F': ' '{print $2}' | awk '{print $1}' \
-        | grep -E '^(en|eth|em|eno|ens|enp|enx)' \
-        | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap)' \
+        | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap|wl|dummy|sit|teql|ifb|ip6tnl)' \
         | sort -u)
     NIC_ARRAY=($PHYS_NICS)
 
-    # Fallback: read directly from /sys/class/net if ip link found nothing
+    # Fallback: read from /sys/class/net
     if [ ${#NIC_ARRAY[@]} -eq 0 ]; then
-        PHYS_NICS=$(ls /sys/class/net/ | grep -E '^(en|eth|em|eno|ens|enp|enx)' | sort -u)
+        PHYS_NICS=$(ls /sys/class/net/ \
+            | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap|wl|dummy|sit)' \
+            | sort -u)
         NIC_ARRAY=($PHYS_NICS)
     fi
 
@@ -682,7 +693,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.46)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.47)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
