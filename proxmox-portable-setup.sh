@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .52
+# Version .53
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.52${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.53${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -501,7 +501,13 @@ done
 
 NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null \
     | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
-NETBIRD="${NETBIRD_IP:-Disconnected}"
+if [[ -n "$NETBIRD_IP" ]]; then
+    curl -sk --max-time 2 "https://${NETBIRD_IP}:8006" >/dev/null 2>&1 \
+        && NETBIRD="${NETBIRD_IP}:8006 (Active)" \
+        || NETBIRD="${NETBIRD_IP}:8006 (Not reachable)"
+else
+    NETBIRD="Disconnected"
+fi
 
 CF_NAME="Not installed"
 if command -v cloudflared >/dev/null 2>&1; then
@@ -550,11 +556,15 @@ for br in vmbr0 vmbr1 vmbr2 vmbr3; do
 done
 [[ -z "$BRIDGE_LINES" ]] && BRIDGE_LINES="║  DHCP IP (vmbr0)   :  None\n"
 
-# ── Netbird — strip CIDR suffix (/16 etc) using -oP to stop at last digit ────
+# ── Netbird — strip CIDR suffix, then test :8006 connectivity ────────────────
 NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null \
     | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
 if [[ -n "$NETBIRD_IP" ]]; then
-    NETBIRD_DISPLAY="${NETBIRD_IP} (Active)"
+    if curl -sk --max-time 2 "https://${NETBIRD_IP}:8006" >/dev/null 2>&1; then
+        NETBIRD_DISPLAY="${NETBIRD_IP}:8006 (Active)"
+    else
+        NETBIRD_DISPLAY="${NETBIRD_IP}:8006 (Not reachable)"
+    fi
 else
     NETBIRD_DISPLAY="Disconnected"
 fi
@@ -591,16 +601,32 @@ if command -v cloudflared >/dev/null 2>&1; then
     fi
 fi
 
+# ── Test hostname :8006 ───────────────────────────────────────
+HOSTNAME_URL="https://$(hostname):8006"
+if curl -sk --max-time 2 "$HOSTNAME_URL" >/dev/null 2>&1; then
+    HOSTNAME_DISPLAY="$(hostname):8006 (Active)"
+else
+    HOSTNAME_DISPLAY="$(hostname):8006 (Not reachable)"
+fi
+
+# ── Test mDNS :8006 ───────────────────────────────────────────
+MDNS_URL="https://$(hostname).local:8006"
+if curl -sk --max-time 2 "$MDNS_URL" >/dev/null 2>&1; then
+    MDNS_DISPLAY="${MDNS_URL} (Active)"
+else
+    MDNS_DISPLAY="${MDNS_URL} (Not reachable)"
+fi
+
 # ── Build /etc/issue ──────────────────────────────────────────
 {
 printf "\n"
 printf "╔══════════════════════════════════════════════════════════════╗\n"
 printf "║               Portable Proxmox HOST                          ║\n"
 printf "╟──────────────────────────────────────────────────────────────╢\n"
-printf "║  Hostname          :  %s:8006\n" "$(hostname)"
+printf "║  Hostname          :  %s\n" "$HOSTNAME_DISPLAY"
 printf "%b" "$BRIDGE_LINES"
 printf "║  Netbird IP        :  %s\n" "$NETBIRD_DISPLAY"
-printf "║  mDNS              :  https://%s.local:8006\n" "$(hostname)"
+printf "║  mDNS              :  %s\n" "$MDNS_DISPLAY"
 printf "║  Cloudflared       :  %s\n" "$CF_DISPLAY"
 printf "╚══════════════════════════════════════════════════════════════╝\n"
 printf "\n"
@@ -776,7 +802,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.52)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.53)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
