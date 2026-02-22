@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .38
+# Version .39
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.38${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.39${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -88,7 +88,8 @@ else
 fi
 
 # Ensure standard Debian repos are present (needed for htop, git, jq, ufw etc)
-# trixie (Debian 13 testing) uses different repo structure — no -security or -updates suites yet
+# Check specifically for deb.debian.org — suite name alone is not unique enough
+# (proxmox.sources also uses the same suite name e.g. "trixie")
 if [[ "$PVE_CODENAME" == "trixie" ]]; then
     DEBIAN_REPOS=(
         "deb http://deb.debian.org/debian trixie main contrib non-free non-free-firmware"
@@ -103,22 +104,26 @@ else
     )
 fi
 for line in "${DEBIAN_REPOS[@]}"; do
-    # Use the suite name (3rd field) as the uniqueness key
+    # Check for the full URL+suite combo — suite alone is not unique
+    url=$(echo "$line" | awk '{print $2}')
     suite=$(echo "$line" | awk '{print $3}')
-    if ! grep -rqF "$suite" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    if ! grep -rq "${url}.*${suite}\|${suite}.*${url}" \
+            /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
         echo "$line" >> /etc/apt/sources.list
-        success "Added Debian repo: $suite"
+        success "Added Debian repo: $suite (${url})"
+    else
+        success "Debian repo already present: $suite"
     fi
 done
 
-# Update and verify
+# Update and verify — check for htop which only comes from Debian repos (not Proxmox repos)
 apt-get update -qq
-if ! apt-cache show curl >/dev/null 2>&1; then
+if ! apt-cache show htop >/dev/null 2>&1; then
     warn "Current /etc/apt/sources.list:"
     cat /etc/apt/sources.list
     warn "Files in sources.list.d:"
     ls /etc/apt/sources.list.d/
-    die "Repo setup failed — curl still not found. Fix sources manually and re-run."
+    die "Repo setup failed — Debian packages not found. Fix sources manually and re-run."
 fi
 success "Repos configured and verified (${PVE_CODENAME})"
 
@@ -627,7 +632,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.38)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.39)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
