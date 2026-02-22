@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .41
+# Version .43
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.41${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.43${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -104,15 +104,16 @@ else
     )
 fi
 for line in "${DEBIAN_REPOS[@]}"; do
-    # Check for the full URL+suite combo — suite alone is not unique
     url=$(echo "$line" | awk '{print $2}')
     suite=$(echo "$line" | awk '{print $3}')
-    if ! grep -rq "${url}.*${suite}\|${suite}.*${url}" \
-            /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    # Check both .list format (deb http://...) and .sources format (URIs:/Suites: fields)
+    if grep -rq "${url}.*${suite}\|${suite}.*${url}" \
+            /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || \
+       grep -rql "deb.debian.org" /etc/apt/sources.list.d/*.sources 2>/dev/null; then
+        success "Debian repo already present: $suite"
+    else
         echo "$line" >> /etc/apt/sources.list
         success "Added Debian repo: $suite (${url})"
-    else
-        success "Debian repo already present: $suite"
     fi
 done
 
@@ -174,22 +175,33 @@ success "System upgraded"
 
 step "PHASE 3 — Netbird"
 if [[ "$NETBIRD_CONNECTED" == true ]]; then
+    # Already installed and connected — ask if re-authorize needed
     echo ""
     read -p "$(echo -e "${BYELLOW}${BOLD}Netbird is already connected (${NETBIRD_IP}). Re-authorize this node? (y/N): ${NC}")" REAUTH
     if [[ ! "${REAUTH,,}" =~ ^y$ ]]; then
         success "Netbird already connected (IP: ${NETBIRD_IP}) — skipping"
     else
-        NETBIRD_CONNECTED=false  # Reset so firewall/UFW phase runs correctly later
+        NETBIRD_CONNECTED=false
         warn "Re-authorizing Netbird on this node..."
         netbird down 2>/dev/null || true
         NETBIRD_DO_SETUP=true
+        NETBIRD_SKIP_INSTALL=true   # Already installed, skip installer
     fi
-else
+elif command -v netbird >/dev/null 2>&1; then
+    # Installed but not connected — skip installer, just re-run netbird up
+    warn "Netbird is installed but not connected — running netbird up to get auth URL"
     NETBIRD_DO_SETUP=true
+    NETBIRD_SKIP_INSTALL=true
+else
+    # Fresh install
+    NETBIRD_DO_SETUP=true
+    NETBIRD_SKIP_INSTALL=false
 fi
 
 if [[ "${NETBIRD_DO_SETUP:-false}" == true ]]; then
-    curl -fsSL https://pkgs.netbird.io/install.sh | sh
+    if [[ "${NETBIRD_SKIP_INSTALL:-false}" == false ]]; then
+        curl -fsSL https://pkgs.netbird.io/install.sh | sh
+    fi
 
     echo -e "Connecting to Netbird management server..."
     # Run netbird up in background and capture output for the auth URL
@@ -644,7 +656,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.41)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.43)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
