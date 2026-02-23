@@ -1,8 +1,8 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.01
-# Fully portable PBS node: DHCP on any network + Netbird + Cloudflared + mDNS
-# Idempotent — safe to re-run
+# Proxmox Backup Server Portable Setup Script v0.02
+# Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
+# Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
 # Run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh)"
 # =============================================================================
@@ -15,13 +15,13 @@ SSH_KEYS=(
 
 NETBIRD_URL="https://netbird.arigonz.com"
 USER_DOMAIN_DEFAULT="arigonz.com"
-HOSTNAME_PREFIX="pbs"
 PBS_PORT=8007
 
-# RECAP
+# RECAP TRACKING
 RECAP_HOSTNAME="-" RECAP_DOMAIN="-" RECAP_REPOS="-" RECAP_UPGRADE="-"
 RECAP_NETBIRD="-" RECAP_CLOUDFLARED="-" RECAP_FIREWALL="-"
-RECAP_MOTD="-" RECAP_MDNS="-" RECAP_NAG="-" RECAP_NETWORK="-" RECAP_SSH_KEYS="-"
+RECAP_MOTD="-" RECAP_MDNS="-" RECAP_NAG="-" RECAP_NETWORK="-"
+RECAP_SSH_KEYS="-" RECAP_GUESTAGENT="-"
 
 success() { echo -e "\e[32m[✔] $1\e[0m"; }
 warn() { echo -e "\e[33m[⚠] $1\e[0m"; }
@@ -31,13 +31,14 @@ info() { echo -e "\e[34m[i] $1\e[0m"; }
 print_recap_box() {
     echo
     echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
-    echo -e "\e[34m║               PBS PORTABLE SETUP RECAP (v0.58)               ║\e[0m"
+    echo -e "\e[34m║               PBS PORTABLE SETUP RECAP (v0.02)               ║\e[0m"
     echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Hostname:" "$RECAP_HOSTNAME"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Domain:" "$RECAP_DOMAIN"
     printf "\e[34m║  %-20s  %s\e[0m\n" "SSH Keys:" "$RECAP_SSH_KEYS"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Repos:" "$RECAP_REPOS"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Upgrade:" "$RECAP_UPGRADE"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Guest Agent:" "$RECAP_GUESTAGENT"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Netbird:" "$RECAP_NETBIRD"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Cloudflared:" "$RECAP_CLOUDFLARED"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Firewall:" "$RECAP_FIREWALL"
@@ -73,22 +74,18 @@ fi
 # =============================================================================
 info "Phase 0: Repository setup"
 rm -f /etc/apt/sources.list.d/*.bak* 2>/dev/null || true
-
 CODENAME=$(grep -oP 'VERSION_CODENAME=\K\w+' /etc/os-release || echo bookworm)
 
-# Disable enterprise repos
 for f in /etc/apt/sources.list.d/pbs-enterprise.*; do
     [[ -f "$f" ]] || continue
     if [[ "$f" == *.list ]]; then sed -i 's/^deb /#deb /g' "$f"
     else sed -i 's/Enabled: yes/Enabled: no/g' "$f"; fi
 done
 
-# Add pbs-no-subscription if missing
 if ! grep -q "pbs-no-subscription" /etc/apt/sources.list* 2>/dev/null; then
     echo "deb http://download.proxmox.com/debian/pbs $CODENAME pbs-no-subscription" >> /etc/apt/sources.list
 fi
 
-# Debian repos if missing
 if ! grep -q deb.debian.org /etc/apt/sources.list* 2>/dev/null; then
     cat <<EOF >> /etc/apt/sources.list
 
@@ -159,12 +156,25 @@ RECAP_HOSTNAME="✔ $NEWHOST"
 RECAP_DOMAIN="✔ $USER_DOMAIN"
 
 # =============================================================================
-# PHASE 2 — Upgrade + packages
+# PHASE 2 — Upgrade + tools
 # =============================================================================
 info "Phase 2: Upgrade + tools"
 apt-get full-upgrade -y && apt-get autoremove -y
 apt-get install -y htop curl git jq wget ufw avahi-daemon
 RECAP_UPGRADE="✔ Packages upgraded"
+
+# =============================================================================
+# PHASE 2.5 — QEMU Guest Agent (VM-specific)
+# =============================================================================
+info "Phase 2.5: QEMU Guest Agent"
+read -p "Install QEMU Guest Agent (recommended for VM)? (y/N) " -n1 -r; echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    apt-get install -y qemu-guest-agent
+    systemctl enable --now qemu-guest-agent
+    RECAP_GUESTAGENT="✔ Installed & enabled"
+else
+    RECAP_GUESTAGENT="⚠ Skipped by user"
+fi
 
 # =============================================================================
 # PHASE 3 — Netbird
@@ -203,15 +213,22 @@ if $NETBIRD_DO_SETUP; then
             read -p "Have you authorized in the browser? (y/n) " -n1 -r; echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 sleep 10
-                if netbird status | grep -q Connected; then NETBIRD_CONNECTED=true; NETBIRD_IP=...; break; fi
-            else RECAP_NETBIRD="⚠ Not authorized — skipping"; break; fi
+                if netbird status | grep -q Connected; then
+                    NETBIRD_CONNECTED=true
+                    NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+                    break
+                fi
+            else
+                RECAP_NETBIRD="⚠ Not authorized — skipping"
+                break
+            fi
         done
     fi
     [[ $NETBIRD_CONNECTED == true ]] && RECAP_NETBIRD="✔ Connected (${NETBIRD_IP})"
 fi
 
 # =============================================================================
-# PHASE 4 — Cloudflared (official method)
+# PHASE 4 — Cloudflared
 # =============================================================================
 info "Phase 4: Cloudflared"
 if command -v cloudflared >/dev/null 2>&1; then
@@ -226,7 +243,7 @@ else
 fi
 
 # =============================================================================
-# PHASE 5 — Firewall, MOTD, mDNS, TTY
+# PHASE 5 — Firewall, MOTD, mDNS, TTY (safe version)
 # =============================================================================
 info "Phase 5: Security + dynamic access"
 
@@ -241,35 +258,27 @@ else
     RECAP_FIREWALL="⚠ Skipped — Netbird not connected"
 fi
 
-# ufw-lan-refresh (sources config so PBS_PORT works)
+# ufw-lan-refresh
 cat > /usr/local/bin/ufw-lan-refresh <<'UFWREF'
 #!/bin/bash
 . /etc/proxmox-portable/config 2>/dev/null || true
 : ${PBS_PORT:=8007}
 LOG=/var/log/ufw-lan-refresh.log
 echo "$(date) - started" >> $LOG
-
 for i in {1..12}; do ip addr show vmbr0 | grep -q "inet " && break; sleep 5; done
-
 SUBNETS=()
 for br in vmbr{0..3}; do
     IP=$(ip -4 addr show $br 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+')
     [[ -n $IP ]] || continue
-    SUBNET=$(python3 -c "
-import ipaddress, sys
-try: print(ipaddress.ip_network('$IP/24', strict=False))
-except: print('${IP%.*}.0/24')
-" 2>/dev/null)
+    SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_network('$IP/24', strict=False))" 2>/dev/null || echo "${IP%.*}.0/24")
     [[ $SUBNET != 100.64* ]] && SUBNETS+=("$SUBNET")
 done
-
 for port in 22 $PBS_PORT; do
     ufw status numbered | grep -E "$port" | grep -v Netbird | while read -r line; do
         num=$(echo "$line" | grep -oP '^\[[0-9]+\]' | tr -d '[]')
         [[ -n $num ]] && echo y | ufw delete $num >> $LOG 2>&1
     done
 done
-
 for s in "${SUBNETS[@]}"; do
     ufw allow from "$s" to any port 22 comment "LAN SSH" >> $LOG 2>&1
     ufw allow from "$s" to any port $PBS_PORT comment "LAN PBS" >> $LOG 2>&1
@@ -309,7 +318,7 @@ echo "Hostname   : https://$HOSTNAME:$PBS_PORT $(curl -sk --max-time 2 https://$
 echo "DHCP IPs:"
 for br in vmbr{0..3}; do
     IP=$(ip -4 addr show $br 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+')
-    [[ -n $IP ]] && echo "  $br: https://$IP:$PBS_PORT $(curl -sk --max-time 2 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
+    [[ -n $IP ]] && echo "  $br : https://$IP:$PBS_PORT $(curl -sk --max-time 2 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 done
 NB_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1)
 echo "Netbird    : ${NB_IP:-Disconnected} $([[ -n $NB_IP ]] && curl -sk --max-time 2 https://$NB_IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "")"
@@ -324,18 +333,23 @@ chmod +x /etc/update-motd.d/99-portable-pbs
 rm -f /etc/motd /etc/motd.tail
 RECAP_MOTD="✔ SSH MOTD + TTY console configured"
 
-# Console + TTY refresh services (same as original design)
+# Safe Console + TTY
 cat > /usr/local/bin/update-console-issue <<'CONSOLE'
 #!/bin/bash
 . /etc/proxmox-portable/config 2>/dev/null || true
 : ${DOMAIN:=local} ${PBS_PORT:=8007}
 cat > /etc/issue <<EOF
 
-Proxmox Backup Server — $HOSTNAME
-Hostname : https://$HOSTNAME:$PBS_PORT
-Netbird  : $(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1 || echo Disconnected)
-mDNS     : $HOSTNAME.local:$PBS_PORT
+═══════════════════════════════════════════════════════════════
+
+          Proxmox Backup Server — $HOSTNAME
+
+Hostname   : https://$HOSTNAME:$PBS_PORT
+Netbird    : $(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1 || echo Disconnected)
+mDNS       : $HOSTNAME.local:$PBS_PORT
 Cloudflared: https://$HOSTNAME.$DOMAIN
+
+═══════════════════════════════════════════════════════════════
 
 EOF
 CONSOLE
@@ -344,15 +358,18 @@ chmod +x /usr/local/bin/update-console-issue
 mkdir -p /etc/systemd/system/getty@tty1.service.d
 cat > /etc/systemd/system/getty@tty1.service.d/override.conf <<EOF
 [Service]
-ExecStartPre=/usr/local/bin/update-console-issue
+ExecStartPre=-/usr/local/bin/update-console-issue
 EOF
 
 cat > /usr/local/bin/netbird-tty-refresh <<'NBTTY'
 #!/bin/bash
-for i in {1..24}; do
-    systemctl restart getty@tty1 2>/dev/null || true
-    sleep 5
-    if netbird status | grep -q Connected && pgrep cloudflared >/dev/null; then break; fi
+for i in {1..12}; do
+    /usr/local/bin/update-console-issue
+    sleep 10
+    if netbird status 2>/dev/null | grep -q Connected && pgrep -f cloudflared >/dev/null 2>&1; then
+        /usr/local/bin/update-console-issue
+        break
+    fi
 done
 NBTTY
 chmod +x /usr/local/bin/netbird-tty-refresh
@@ -385,25 +402,28 @@ done
 [[ -z $RECAP_NAG ]] && RECAP_NAG="⚠ JS file not found"
 
 # =============================================================================
-# PHASE 7 — Networking
+# PHASE 7 — Networking (VM-safe)
 # =============================================================================
 info "Phase 7: Networking"
-if ip link show vmbr0 >/dev/null 2>&1 && grep -q "vmbr0 inet dhcp" /etc/network/interfaces 2>/dev/null; then
-    RECAP_NETWORK="✔ Already DHCP (skipped)"
+if systemd-detect-virt -q; then
+    RECAP_NETWORK="✔ Skipped (running in VM — host handles networking)"
 else
-    warn "This will REWRITE /etc/network/interfaces with DHCP bridges (reboot required)!"
-    read -p "Apply? (y/N) " -n1 -r; echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date +%s)"
-        NICS=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap|wl|dummy|sit|teql|ifb|ip6tnl)' | head -5)
-        cat > /etc/network/interfaces <<EOF
+    if ip link show vmbr0 >/dev/null 2>&1 && grep -q "vmbr0 inet dhcp" /etc/network/interfaces 2>/dev/null; then
+        RECAP_NETWORK="✔ Already DHCP (skipped)"
+    else
+        warn "This will REWRITE /etc/network/interfaces with DHCP bridges (reboot required)!"
+        read -p "Apply? (y/N) " -n1 -r; echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date +%s)"
+            NICS=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br|vmbr|veth|bond|wg|virbr|tun|tap|wl|dummy|sit|teql|ifb|ip6tnl)' | head -5)
+            cat > /etc/network/interfaces <<EOF
 auto lo
 iface lo inet loopback
 
 EOF
-        i=0
-        for nic in $NICS; do
-            cat >> /etc/network/interfaces <<EOF
+            i=0
+            for nic in $NICS; do
+                cat >> /etc/network/interfaces <<EOF
 auto vmbr$i
 iface vmbr$i inet dhcp
         bridge-ports $nic
@@ -412,11 +432,12 @@ iface vmbr$i inet dhcp
         bridge-maxwait 0
 
 EOF
-            ((i++))
-        done
-        RECAP_NETWORK="✔ Dual DHCP bridges written (reboot required)"
-    else
-        RECAP_NETWORK="⚠ Skipped by user"
+                ((i++))
+            done
+            RECAP_NETWORK="✔ Dual DHCP bridges written (reboot required)"
+        else
+            RECAP_NETWORK="⚠ Skipped by user"
+        fi
     fi
 fi
 
