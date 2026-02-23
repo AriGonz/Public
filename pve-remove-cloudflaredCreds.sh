@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
-# Removes existing Cloudflare Tunnel auth + service setup on Proxmox
-# Run as root
-#
-# Use at your own risk — backup important files first!
+# Cloudflared full reset + reinstall script for Proxmox (root-only)
+# Version: .02
 # Run as root: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-remove-cloudflaredCreds.sh)"
-# Version: .01
 
 set -euo pipefail
 
-# Quick root check
 if [[ $EUID -ne 0 ]]; then
     echo "Error: This script must be run as root"
     exit 1
 fi
 
 echo "===================================================="
-echo " Cloudflared Reset + Reinstall Script Version .01"
+echo " Cloudflared Reset + Reinstall Script Version .02"
 echo "===================================================="
 echo "This will:"
 echo "  - Stop/uninstall existing service & clean credentials"
@@ -39,16 +35,13 @@ systemctl disable 'cloudflared@*' >/dev/null 2>&1 || true
 
 cloudflared service uninstall >/dev/null 2>&1 || true
 
-# Remove unit files
 rm -f /etc/systemd/system/cloudflared.service
 rm -f /etc/systemd/system/cloudflared@*.service
 
-# Remove repo files & keys (both old and current)
 rm -f /etc/apt/sources.list.d/cloudflared.list
 rm -f /usr/share/keyrings/cloudflare-public-v2.gpg
 rm -f /usr/share/keyrings/cloudflare-main.gpg
 
-# Aggressive credential/config cleanup
 rm -rf /root/.cloudflared/*     2>/dev/null || true
 rm -rf /etc/cloudflared/*       2>/dev/null || true
 rm -rf ~/.cloudflared/*         2>/dev/null || true
@@ -62,14 +55,14 @@ systemctl reset-failed
 echo "→ First systemd refresh done."
 
 # ────────────────────────────────────────────────
-# Phase 2: Reinstall cloudflared package (official method, no sudo)
+# Phase 2: Reinstall (clean output)
 # ────────────────────────────────────────────────
 echo "→ Phase 2: Re-adding Cloudflare repo & reinstalling cloudflared..."
 
 mkdir -p --mode=0755 /usr/share/keyrings
 curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
 
-echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | tee /etc/apt/sources.list.d/cloudflared.list
+echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
 
 apt-get update -qq
 apt-get install --reinstall -y cloudflared
@@ -90,7 +83,7 @@ systemctl restart cloudflared >/dev/null 2>&1 || true
 echo "→ Service restart attempted."
 
 # ────────────────────────────────────────────────
-# Final on-screen instructions (the only "prompt")
+# Final on-screen instructions (prompt to finish)
 # ────────────────────────────────────────────────
 echo ""
 echo "===================================================="
