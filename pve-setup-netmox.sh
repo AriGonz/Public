@@ -3,12 +3,12 @@ set -e
 # =====================================================
 #
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-setup-netmox.sh)"
-# Version .04
+# Version .05
 # =====================================================
 
 # Fancy header banner
 echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
-echo -e "\e[34m║              pve-setup-netmox.sh (v0.04)                     ║\e[0m"
+echo -e "\e[34m║              pve-setup-netmox.sh (v0.05)                     ║\e[0m"
 echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
 
 # ==================== CONFIG ====================
@@ -35,17 +35,13 @@ err() { echo -e "${RED}[ERROR] $1${NC}"; exit 1; }
 
 [[ $EUID -ne 0 ]] && err "Run as root"
 
-# ==================== ROBUST NETBIRD IP DETECTION ====================
+# ==================== NETBIRD IP DETECTION ====================
 get_nb_ip() {
-  # Primary method: NetBird JSON
   local ip=$(netbird status --json 2>/dev/null | jq -r '.NetBirdIP // empty' | cut -d/ -f1)
-  
-  # Fallback: scan wt0 interface for any 100.64–127.x IP
   if [[ -z "$ip" || "$ip" == "null" ]]; then
     ip=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d+\.\d+' | head -n1)
   fi
-
-  [[ -z "$ip" ]] && err "Could not detect NetBird IP (100.x range). Is NetBird connected?"
+  [[ -z "$ip" ]] && err "Could not detect NetBird IP (check netbird status)"
   echo "$ip"
 }
 
@@ -56,7 +52,7 @@ resolve_ip() {
 is_prepared() { [ -f "/root/.netmox-prepared" ]; }
 is_clustered() { pvecm status 2>/dev/null | grep -q "Cluster Name:"; }
 
-# ==================== AUTO-DETECTION ====================
+# ==================== AUTO DETECTION ====================
 THIS_NODE="$(hostname).netbird.selfhosted"
 IS_PRIMARY=$([[ "$THIS_NODE" == "$PRIMARY_NODE" ]] && echo true || echo false)
 
@@ -75,7 +71,6 @@ prepare() {
   MY_IP=$(get_nb_ip)
   log "This node's NetBird IP = $MY_IP"
 
-  # /etc/hosts
   log "Updating /etc/hosts..."
   cp /etc/hosts /etc/hosts.netmox.bak 2>/dev/null || true
   sed -i '/# Netmox NetBird Cluster/d' /etc/hosts
@@ -92,7 +87,6 @@ prepare() {
     fi
   done
 
-  # Firewall
   log "Adding Corosync firewall rules..."
   apt-get install -y iptables-persistent net-tools jq
   IFACE="wt0"
@@ -104,13 +98,13 @@ prepare() {
   log "✅ Prepare completed"
 }
 
-# ==================== CREATE / JOIN ====================
+# ==================== CREATE / JOIN (FIXED SYNTAX) ====================
 create() {
   [[ "$IS_PRIMARY" != true ]] && err "Not the primary node"
   log "=== Creating cluster ==="
   MY_IP=$(get_nb_ip)
   log "Using NetBird IP: $MY_IP"
-  pvecm create "$CLUSTER_NAME" --link0 name=netbird0,addr="$MY_IP" || err "pvecm create failed"
+  pvecm create "$CLUSTER_NAME" --link0 "$MY_IP" || err "pvecm create failed"
   log "✅ Cluster created successfully!"
 }
 
@@ -122,11 +116,14 @@ join() {
   [[ -z "$PRIMARY_IP" ]] && err "Cannot resolve primary $PRIMARY_NODE"
   
   MY_IP=$(get_nb_ip)
-  log "Primary IP  = $PRIMARY_IP"
+  log "Primary IP   = $PRIMARY_IP"
   log "This node IP = $MY_IP"
   
-  pvecm add "$PRIMARY_IP" --link0 name=netbird0,addr="$MY_IP" || err "pvecm add failed - check above errors"
+  pvecm add "$PRIMARY_IP" --link0 "$MY_IP" || err "pvecm add failed - check the errors above"
   log "✅ Successfully joined the cluster!"
+  echo ""
+  log "Waiting 5 seconds for cluster sync..."
+  sleep 5
 }
 
 # ==================== STATUS ====================
