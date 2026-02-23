@@ -7,6 +7,11 @@
 # Flow: Uninstall & clean → systemd refresh → Reinstall package (official repo) → systemd refresh + start → final instructions
 
 set -euo pipefail
+echo "===================================================="
+echo "     Version .01
+echo "===================================================="
+
+
 
 echo "===================================================="
 echo "     Cloudflared Reset + Reinstall Script (Root)"
