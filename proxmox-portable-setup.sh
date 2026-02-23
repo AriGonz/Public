@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .57
+# Version .58
 # =====================================================
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -52,7 +52,7 @@ RECAP_SSH_KEYS="-"
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.57${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.58${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -277,14 +277,20 @@ if [[ "${NETBIRD_DO_SETUP:-false}" == true ]]; then
     NETBIRD_LOG=$(mktemp /tmp/netbird-XXXXX.log)
     netbird up --management-url ${NETBIRD_URL} > "$NETBIRD_LOG" 2>&1 &
 
-    echo -e "Waiting 10s for Netbird to initialize..."
-    sleep 10
-
-    NETBIRD_AUTH_URL=$(grep -oE 'https://[^ ]+' "$NETBIRD_LOG" 2>/dev/null \
-        | grep -v 'pkgs\|install\|docs' | head -1 || true)
+    # Extract auth URL — wait briefly for netbird to write it to the log
+    NETBIRD_AUTH_URL=""
+    for i in {1..10}; do
+        sleep 1
+        NETBIRD_AUTH_URL=$(grep -oE 'https://[^ ]+' "$NETBIRD_LOG" 2>/dev/null \
+            | grep -v 'pkgs\|install\|docs' | head -1 || true)
+        [[ -n "$NETBIRD_AUTH_URL" ]] && break
+    done
     if [[ -z "$NETBIRD_AUTH_URL" ]]; then
         NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
     fi
+
+    # Extract the user_code from the auth URL for the device flow URL
+    USER_CODE=$(echo "$NETBIRD_AUTH_URL" | grep -oP 'user_code=\K[^&]+' || true)
 
     echo ""
     echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -297,8 +303,15 @@ if [[ "${NETBIRD_DO_SETUP:-false}" == true ]]; then
         echo -e "${BWHITE}${BOLD}  Run 'netbird status' to get your authorization URL${NC}"
         echo -e "${BWHITE}${BOLD}  Management URL: ${BCYAN}${NETBIRD_URL}${NC}"
     fi
+    if [[ -n "$USER_CODE" ]]; then
+        echo -e "${BWHITE}${BOLD}  Device flow URL:${NC}"
+        echo -e "${BCYAN}${BOLD}  https://netbird.arigonz.com/oauth2/device?user_code=${USER_CODE}${NC}"
+    fi
     echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
+
+    echo -e "${BYELLOW}${BOLD}⏳ Waiting 10s for Netbird to initialize before checking...${NC}"
+    sleep 10
 
     echo -e "${BYELLOW}${BOLD}⏳ Waiting for Netbird authorization...${NC}"
 
@@ -329,26 +342,22 @@ if [[ "${NETBIRD_DO_SETUP:-false}" == true ]]; then
 
     if [[ "$NETBIRD_CONNECTED" == false ]]; then
         echo ""
-        while true; do
-            read -p "$(echo -e "${BYELLOW}${BOLD}Have you authorized the device at the URL above? (y/n): ${NC}")" USER_ANSWER
-            if [[ "${USER_ANSWER,,}" == "y" ]]; then
-                echo -e "${BYELLOW}${BOLD}⏳ Checking connection...${NC}"
-                for i in {1..10}; do
-                    if check_netbird; then
-                        echo ""
-                        success "Netbird connected! Netbird IP: ${NETBIRD_IP}"
-                        break
-                    fi
-                    sleep 1
-                done
-                [[ "$NETBIRD_CONNECTED" == true ]] && break
-                warn "Still not connected — please check the URL and try again"
-            elif [[ "${USER_ANSWER,,}" == "n" ]]; then
-                warn "Netbird not authorized — skipping Netbird-dependent steps"
-RECAP_NETBIRD="⚠ Not authorized — skipping"
+        echo -e "${BYELLOW}${BOLD}  Authorize the device at the URL above, then press ENTER to continue.${NC}"
+        echo -e "${BYELLOW}${BOLD}  (Press ENTER without authorizing to skip Netbird setup)${NC}"
+        read -rp "" _PAUSE
+        echo -e "${BYELLOW}${BOLD}⏳ Checking connection...${NC}"
+        for i in {1..10}; do
+            if check_netbird; then
+                echo ""
+                success "Netbird connected! Netbird IP: ${NETBIRD_IP}"
                 break
             fi
+            sleep 1
         done
+        if [[ "$NETBIRD_CONNECTED" == false ]]; then
+            warn "Netbird not connected — skipping Netbird-dependent steps"
+            RECAP_NETBIRD="⚠ Not authorized — skipping"
+        fi
     fi
     echo ""
 fi
@@ -817,6 +826,13 @@ fi
 step "PHASE 8 — Complete"
 
 # ── Recap ─────────────────────────────────────────────────────
+# Show Netbird device flow URL if we captured a user_code earlier
+if [[ -n "${USER_CODE:-}" ]]; then
+    echo -e ""
+    echo -e "${BYELLOW}${BOLD}  Netbird Device Flow URL (if still needed):${NC}"
+    echo -e "${BCYAN}${BOLD}  https://netbird.arigonz.com/oauth2/device?user_code=${USER_CODE}${NC}"
+    echo -e ""
+fi
 echo -e ""
 echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║                     SETUP RECAP                              ║${NC}"
