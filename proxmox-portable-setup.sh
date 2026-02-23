@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .53
+# Version .54
 # =====================================================
 
 set -e
@@ -11,7 +11,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.53${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.54${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -488,41 +488,89 @@ sed -i 's/use-ipv6=yes/use-ipv6=no/' /etc/avahi/avahi-daemon.conf 2>/dev/null ||
 systemctl enable --now avahi-daemon
 success "Avahi mDNS configured (IPv4 only)"
 
-# MOTD — shown over SSH
+# MOTD — shown over SSH (mirrors Physical Console Screen exactly)
 cat > /etc/update-motd.d/99-portable-proxmox << 'MOTD'
 #!/bin/bash
-# Collect one line per active bridge
+
+# Read saved config
+DOMAIN=""
+[ -f /etc/proxmox-portable/config ] && . /etc/proxmox-portable/config
+
+# ── Hostname :8006 test ───────────────────────────────────────────────────────
+if curl -sk --max-time 2 "https://$(hostname):8006" >/dev/null 2>&1; then
+    HOSTNAME_DISPLAY="$(hostname):8006 (Active)"
+else
+    HOSTNAME_DISPLAY="$(hostname):8006 (Not reachable)"
+fi
+
+# ── DHCP IPs — one line per active bridge, test :8006 connectivity ───────────
 BRIDGE_LINES=""
 for br in vmbr0 vmbr1 vmbr2 vmbr3; do
     IP=$(ip -4 addr show "$br" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
-    [[ -n "$IP" ]] && BRIDGE_LINES="${BRIDGE_LINES}║  DHCP IP (${br})   :  ${IP}:8006\n"
+    if [[ -n "$IP" ]]; then
+        if curl -sk --max-time 2 "https://${IP}:8006" >/dev/null 2>&1; then
+            STATUS="Active"
+        else
+            STATUS="Not reachable"
+        fi
+        BRIDGE_LINES="${BRIDGE_LINES}║  DHCP IP (${br})   :  ${IP}:8006 (${STATUS})\n"
+    fi
 done
 [[ -z "$BRIDGE_LINES" ]] && BRIDGE_LINES="║  DHCP IP (vmbr0)   :  None\n"
 
+# ── Netbird — strip CIDR, test :8006 ─────────────────────────────────────────
 NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null \
     | grep -oP '(?<=inet\s)100\.[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)
 if [[ -n "$NETBIRD_IP" ]]; then
-    curl -sk --max-time 2 "https://${NETBIRD_IP}:8006" >/dev/null 2>&1 \
-        && NETBIRD="${NETBIRD_IP}:8006 (Active)" \
-        || NETBIRD="${NETBIRD_IP}:8006 (Not reachable)"
+    if curl -sk --max-time 2 "https://${NETBIRD_IP}:8006" >/dev/null 2>&1; then
+        NETBIRD_DISPLAY="${NETBIRD_IP}:8006 (Active)"
+    else
+        NETBIRD_DISPLAY="${NETBIRD_IP}:8006 (Not reachable)"
+    fi
 else
-    NETBIRD="Disconnected"
+    NETBIRD_DISPLAY="Disconnected"
 fi
 
-CF_NAME="Not installed"
+# ── mDNS :8006 test ──────────────────────────────────────────────────────────
+MDNS_URL="https://$(hostname).local:8006"
+if curl -sk --max-time 2 "$MDNS_URL" >/dev/null 2>&1; then
+    MDNS_DISPLAY="${MDNS_URL} (Active)"
+else
+    MDNS_DISPLAY="${MDNS_URL} (Not reachable)"
+fi
+
+# ── Cloudflared ───────────────────────────────────────────────────────────────
+CF_DISPLAY="Not installed"
 if command -v cloudflared >/dev/null 2>&1; then
-    systemctl is-active --quiet cloudflared 2>/dev/null \
-        && CF_NAME="Active" || CF_NAME="Installed but not running"
+    CF_RUNNING=false
+    for svc in cloudflared cloudflared.service; do
+        systemctl is-active --quiet "$svc" 2>/dev/null && CF_RUNNING=true && break
+    done
+    [[ "$CF_RUNNING" == false ]] && pgrep -x cloudflared >/dev/null 2>&1 && CF_RUNNING=true
+    if [[ "$CF_RUNNING" == true ]]; then
+        CF_URL=""
+        [[ -n "$DOMAIN" ]] && CF_URL="https://$(hostname).${DOMAIN}"
+        CF_METRICS_OK=false
+        for port in 2000 20241 2001 8080; do
+            curl -sf --max-time 2 "http://localhost:${port}/metrics" >/dev/null 2>&1 \
+                && CF_METRICS_OK=true && break
+        done
+        [[ "$CF_METRICS_OK" == true ]] \
+            && CF_DISPLAY="${CF_URL:-Active} (Active)" \
+            || CF_DISPLAY="${CF_URL:-Active} (Not active)"
+    else
+        CF_DISPLAY="Installed but not running"
+    fi
 fi
 
 printf "╔══════════════════════════════════════════════════════════════╗\n"
 printf "║               Portable Proxmox HOST                          ║\n"
 printf "╟──────────────────────────────────────────────────────────────╢\n"
-printf "║  Hostname          :  %s:8006\n" "$(hostname)"
+printf "║  Hostname          :  %s\n" "$HOSTNAME_DISPLAY"
 printf "%b" "$BRIDGE_LINES"
-printf "║  Netbird IP        :  %s\n" "$NETBIRD"
-printf "║  Cloudflared       :  %s\n" "$CF_NAME"
-printf "║  mDNS              :  https://%s.local:8006\n" "$(hostname)"
+printf "║  Netbird IP        :  %s\n" "$NETBIRD_DISPLAY"
+printf "║  mDNS              :  %s\n" "$MDNS_DISPLAY"
+printf "║  Cloudflared       :  %s\n" "$CF_DISPLAY"
 printf "╚══════════════════════════════════════════════════════════════╝\n"
 MOTD
 chmod +x /etc/update-motd.d/99-portable-proxmox
@@ -802,7 +850,7 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.53)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.54)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
