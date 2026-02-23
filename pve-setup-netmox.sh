@@ -1,12 +1,15 @@
 #!/bin/bash
 set -e
-
 # =====================================================
-# 
+#
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-setup-netmox.sh)"
-# Version .01
+# Version .03
 # =====================================================
 
+# Fancy header banner
+echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
+echo -e "\e[34m║              pve-setup-netmox.sh (v0.03)                     ║\e[0m"
+echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
 
 # ==================== CONFIG (edit only these two things) ====================
 CLUSTER_NAME="netbird-cluster"
@@ -16,7 +19,7 @@ PRIMARY_NODE="pve-00.netbird.selfhosted"   # ← change ONLY if your primary has
 # All nodes in your cluster (add or remove as needed)
 NODES=(
   "pve-00.netbird.selfhosted"
-  "pve-01.netbird.selfhosted"   # ← make sure pve-01 is here
+  "pve-01.netbird.selfhosted"
   "pve-02.netbird.selfhosted"
   "pve-03.netbird.selfhosted"
 )
@@ -93,7 +96,7 @@ prepare() {
   log "✅ Prepare completed"
 }
 
-# ==================== CREATE / JOIN / STATUS (same as before) ====================
+# ==================== CREATE ====================
 create() {
   [[ "$IS_PRIMARY" != true ]] && err "Not the primary node"
   log "=== Creating cluster ==="
@@ -102,6 +105,7 @@ create() {
   log "✅ Cluster created!"
 }
 
+# ==================== JOIN ====================
 join() {
   [[ "$IS_PRIMARY" == true ]] && err "Primary node does not join"
   log "=== Joining cluster ==="
@@ -112,6 +116,7 @@ join() {
   log "✅ Successfully joined the cluster!"
 }
 
+# ==================== STATUS ====================
 status() {
   echo "=== NetBird ==="
   netbird status
@@ -119,7 +124,7 @@ status() {
   pvecm status 2>/dev/null || echo "No cluster yet"
 }
 
-# ==================== WIZARD MODE (just run ./netmox.sh) ====================
+# ==================== WIZARD MODE (just run the script) ====================
 if [[ -n "$1" ]]; then
   case "$1" in
     prepare) prepare ;;
@@ -162,5 +167,5 @@ case "$choice" in
     if [[ "$IS_PRIMARY" == true ]]; then create; else join; fi
     ;;
   2) status ;;
-  *) log "Exiting. Run ./netmox.sh again anytime." ;;
+  *) log "Exiting. Run the script again anytime." ;;
 esac
