@@ -3,12 +3,11 @@ set -e
 # =====================================================
 #
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-setup-netmox.sh)"
-# Version .06
+# Version .08
 # =====================================================
 
-# Fancy header banner
 echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
-echo -e "\e[34m║              pve-setup-netmox.sh (v0.06)                     ║\e[0m"
+echo -e "\e[34m║              pve-setup-netmox.sh (v0.08)                     ║\e[0m"
 echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
 echo -e "\e[34m║      Proxmox Cluster Setup over NetBird                      ║\e[0m"
 echo -e "\e[34m╚══════════════════════════════════════════════════════════════╝\e[0m"
@@ -37,13 +36,12 @@ err() { echo -e "${RED}[ERROR] $1${NC}"; exit 1; }
 
 [[ $EUID -ne 0 ]] && err "Run as root"
 
-# ==================== NETBIRD IP DETECTION ====================
 get_nb_ip() {
   local ip=$(netbird status --json 2>/dev/null | jq -r '.NetBirdIP // empty' | cut -d/ -f1)
   if [[ -z "$ip" || "$ip" == "null" ]]; then
     ip=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d+\.\d+' | head -n1)
   fi
-  [[ -z "$ip" ]] && err "Could not detect NetBird IP (check 'netbird status')"
+  [[ -z "$ip" ]] && err "Could not detect NetBird IP (check netbird status)"
   echo "$ip"
 }
 
@@ -61,32 +59,41 @@ IS_PRIMARY=$([[ "$THIS_NODE" == "$PRIMARY_NODE" ]] && echo true || echo false)
 log "Detected this node → $THIS_NODE (Primary: $IS_PRIMARY)"
 
 if ! printf '%s\n' "${NODES[@]}" | grep -qx "$THIS_NODE"; then
-  err "This node ($THIS_NODE) is not in the NODES list! Update the config."
+  err "This node ($THIS_NODE) is not in the NODES list!"
 fi
 
-# ==================== PREPARE ====================
+# ==================== PREPARE (REBUILDS /etc/hosts) ====================
 prepare() {
   log "=== Netmox Prepare ==="
-  command -v netbird >/dev/null || err "netbird command not found"
+  command -v netbird >/dev/null || err "netbird not found"
   netbird status | grep -q "Connected" || err "NetBird is not connected"
 
   MY_IP=$(get_nb_ip)
+  SHORT=$(hostname -s)
   log "This node's NetBird IP = $MY_IP"
 
-  log "Updating /etc/hosts..."
+  log "Rebuilding /etc/hosts — forcing NetBird IP only (no more 10.0.4.77!)"
   cp /etc/hosts /etc/hosts.netmox.bak 2>/dev/null || true
-  sed -i '/# Netmox NetBird Cluster/d' /etc/hosts
-  sed -i '/\.netbird\.selfhosted/d' /etc/hosts 2>/dev/null || true
 
-  echo "# Netmox NetBird Cluster" >> /etc/hosts
+  cat > /etc/hosts <<EOF
+127.0.0.1   localhost
+::1         localhost ip6-localhost ip6-loopback
+ff02::1     ip6-allnodes
+ff02::2     ip6-allrouters
+
+# Netmox NetBird Cluster - ONLY NetBird IPs
+$MY_IP   $THIS_NODE   $SHORT
+
+EOF
+
   for node in "${NODES[@]}"; do
-    ip=$(resolve_ip "$node")
-    if [[ -n "$ip" ]]; then
-      short=${node%%.*}
-      printf "%-15s %-30s %s\n" "$ip" "$node" "$short" >> /etc/hosts
-      log "  $node → $ip"
-    else
-      warn "Could not resolve $node"
+    if [[ "$node" != "$THIS_NODE" ]]; then
+      ip=$(resolve_ip "$node")
+      if [[ -n "$ip" ]]; then
+        short=${node%%.*}
+        echo "$ip   $node   $short" >> /etc/hosts
+        log "  $short → $ip"
+      fi
     fi
   done
 
@@ -98,7 +105,7 @@ prepare() {
   netfilter-persistent save
 
   touch "/root/.netmox-prepared"
-  log "✅ Prepare completed successfully"
+  log "✅ Prepare completed (hosts rebuilt)"
 }
 
 # ==================== CREATE / JOIN ====================
@@ -116,28 +123,30 @@ join() {
   log "=== Joining cluster ==="
 
   PRIMARY_IP=$(resolve_ip "$PRIMARY_NODE")
-  [[ -z "$PRIMARY_IP" ]] && err "Cannot resolve primary node $PRIMARY_NODE"
+  [[ -z "$PRIMARY_IP" ]] && err "Cannot resolve primary $PRIMARY_NODE"
 
   MY_IP=$(get_nb_ip)
   log "Primary IP   = $PRIMARY_IP"
   log "This node IP = $MY_IP"
 
-  pvecm add "$PRIMARY_IP" --link0 "$MY_IP" || err "pvecm add failed - check errors above"
+  pvecm add "$PRIMARY_IP" --link0 "$MY_IP" || err "pvecm add failed - check the errors above"
   log "✅ Successfully joined the cluster!"
   echo ""
-  log "Waiting 5 seconds for cluster synchronization..."
-  sleep 5
+  log "Waiting 6 seconds for sync..."
+  sleep 6
+  log "Restarting cluster services..."
+  systemctl restart corosync pve-cluster
 }
 
 # ==================== STATUS ====================
 status() {
-  echo "=== NetBird Status ==="
+  echo "=== NetBird ==="
   netbird status
-  echo -e "\n=== Proxmox Cluster Status ==="
-  pvecm status 2>/dev/null || echo "No cluster detected yet."
+  echo -e "\n=== Cluster ==="
+  pvecm status 2>/dev/null || echo "No cluster yet"
 }
 
-# ==================== WIZARD MODE ====================
+# ==================== WIZARD ====================
 if [[ -n "$1" ]]; then
   case "$1" in
     prepare) prepare ;;
@@ -150,17 +159,17 @@ if [[ -n "$1" ]]; then
 fi
 
 if ! is_prepared; then
-  log "First time run - Running prepare automatically..."
+  log "First run → running prepare automatically..."
   prepare
 fi
 
 if is_clustered; then
-  log "This node is already part of a cluster!"
+  log "This node is already in a cluster!"
   status
   exit 0
 fi
 
-log "Node is prepared but not clustered yet."
+log "Node is ready but not clustered yet."
 echo ""
 if [[ "$IS_PRIMARY" == true ]]; then
   echo "PRIMARY node ($THIS_NODE)"
@@ -176,13 +185,9 @@ read -p "Choose [1-3]: " choice
 
 case "$choice" in
   1)
-    if [[ "$IS_PRIMARY" == true ]]; then 
-      create
-    else 
-      join
-    fi
-    status   # ← shows final status automatically
+    if [[ "$IS_PRIMARY" == true ]]; then create; else join; fi
+    status
     ;;
   2) status ;;
-  *) log "Exiting. Run the script again anytime." ;;
+  *) log "Exiting. Run again anytime." ;;
 esac
