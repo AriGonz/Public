@@ -3,27 +3,26 @@ set -e
 # =====================================================
 #
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-setup-netmox.sh)"
-# Version .03
+# Version .04
 # =====================================================
 
 # Fancy header banner
 echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
-echo -e "\e[34m║              pve-setup-netmox.sh (v0.03)                     ║\e[0m"
+echo -e "\e[34m║              pve-setup-netmox.sh (v0.04)                     ║\e[0m"
 echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
 
-# ==================== CONFIG (edit only these two things) ====================
+# ==================== CONFIG ====================
 CLUSTER_NAME="netbird-cluster"
 
-PRIMARY_NODE="pve-00.netbird.selfhosted"   # ← change ONLY if your primary has a different name
+PRIMARY_NODE="pve-00.netbird.selfhosted"
 
-# All nodes in your cluster (add or remove as needed)
 NODES=(
   "pve-00.netbird.selfhosted"
   "pve-01.netbird.selfhosted"
   "pve-02.netbird.selfhosted"
   "pve-03.netbird.selfhosted"
 )
-# ===========================================================================
+# ===============================================
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -36,19 +35,18 @@ err() { echo -e "${RED}[ERROR] $1${NC}"; exit 1; }
 
 [[ $EUID -ne 0 ]] && err "Run as root"
 
-# ==================== AUTO-DETECTION (no more mistakes) ====================
-THIS_NODE="$(hostname).netbird.selfhosted"
-IS_PRIMARY=$([[ "$THIS_NODE" == "$PRIMARY_NODE" ]] && echo true || echo false)
-
-log "Detected this node → $THIS_NODE (Primary: $IS_PRIMARY)"
-
-# Safety check
-if ! printf '%s\n' "${NODES[@]}" | grep -qx "$THIS_NODE"; then
-  err "This node ($THIS_NODE) is not in the NODES list. Please update the config."
-fi
-
+# ==================== ROBUST NETBIRD IP DETECTION ====================
 get_nb_ip() {
-  netbird status --json 2>/dev/null | jq -r '.NetBirdIP' | cut -d/ -f1 || echo ""
+  # Primary method: NetBird JSON
+  local ip=$(netbird status --json 2>/dev/null | jq -r '.NetBirdIP // empty' | cut -d/ -f1)
+  
+  # Fallback: scan wt0 interface for any 100.64–127.x IP
+  if [[ -z "$ip" || "$ip" == "null" ]]; then
+    ip=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d+\.\d+' | head -n1)
+  fi
+
+  [[ -z "$ip" ]] && err "Could not detect NetBird IP (100.x range). Is NetBird connected?"
+  echo "$ip"
 }
 
 resolve_ip() {
@@ -58,6 +56,16 @@ resolve_ip() {
 is_prepared() { [ -f "/root/.netmox-prepared" ]; }
 is_clustered() { pvecm status 2>/dev/null | grep -q "Cluster Name:"; }
 
+# ==================== AUTO-DETECTION ====================
+THIS_NODE="$(hostname).netbird.selfhosted"
+IS_PRIMARY=$([[ "$THIS_NODE" == "$PRIMARY_NODE" ]] && echo true || echo false)
+
+log "Detected this node → $THIS_NODE (Primary: $IS_PRIMARY)"
+
+if ! printf '%s\n' "${NODES[@]}" | grep -qx "$THIS_NODE"; then
+  err "This node ($THIS_NODE) is not in the NODES list!"
+fi
+
 # ==================== PREPARE ====================
 prepare() {
   log "=== Netmox Prepare ==="
@@ -65,7 +73,7 @@ prepare() {
   netbird status | grep -q "Connected" || err "NetBird is not connected"
 
   MY_IP=$(get_nb_ip)
-  [[ -z "$MY_IP" ]] && err "Could not get NetBird IP"
+  log "This node's NetBird IP = $MY_IP"
 
   # /etc/hosts
   log "Updating /etc/hosts..."
@@ -86,7 +94,7 @@ prepare() {
 
   # Firewall
   log "Adding Corosync firewall rules..."
-  apt-get install -y iptables-persistent net-tools
+  apt-get install -y iptables-persistent net-tools jq
   IFACE="wt0"
   iptables -I INPUT  -i "$IFACE" -p udp --dport 5404:5405 -j ACCEPT 2>/dev/null || true
   iptables -I OUTPUT -o "$IFACE" -p udp --sport 5404:5405 -j ACCEPT 2>/dev/null || true
@@ -96,23 +104,28 @@ prepare() {
   log "✅ Prepare completed"
 }
 
-# ==================== CREATE ====================
+# ==================== CREATE / JOIN ====================
 create() {
   [[ "$IS_PRIMARY" != true ]] && err "Not the primary node"
   log "=== Creating cluster ==="
   MY_IP=$(get_nb_ip)
-  pvecm create "$CLUSTER_NAME" --link0 "$MY_IP"
-  log "✅ Cluster created!"
+  log "Using NetBird IP: $MY_IP"
+  pvecm create "$CLUSTER_NAME" --link0 name=netbird0,addr="$MY_IP" || err "pvecm create failed"
+  log "✅ Cluster created successfully!"
 }
 
-# ==================== JOIN ====================
 join() {
   [[ "$IS_PRIMARY" == true ]] && err "Primary node does not join"
   log "=== Joining cluster ==="
+  
   PRIMARY_IP=$(resolve_ip "$PRIMARY_NODE")
-  [[ -z "$PRIMARY_IP" ]] && err "Cannot resolve $PRIMARY_NODE"
+  [[ -z "$PRIMARY_IP" ]] && err "Cannot resolve primary $PRIMARY_NODE"
+  
   MY_IP=$(get_nb_ip)
-  pvecm add "$PRIMARY_IP" --link0 "$MY_IP"
+  log "Primary IP  = $PRIMARY_IP"
+  log "This node IP = $MY_IP"
+  
+  pvecm add "$PRIMARY_IP" --link0 name=netbird0,addr="$MY_IP" || err "pvecm add failed - check above errors"
   log "✅ Successfully joined the cluster!"
 }
 
@@ -124,7 +137,7 @@ status() {
   pvecm status 2>/dev/null || echo "No cluster yet"
 }
 
-# ==================== WIZARD MODE (just run the script) ====================
+# ==================== WIZARD ====================
 if [[ -n "$1" ]]; then
   case "$1" in
     prepare) prepare ;;
@@ -147,7 +160,6 @@ if is_clustered; then
   exit 0
 fi
 
-# Not clustered → smart menu
 log "Node is ready but not clustered yet."
 echo ""
 if [[ "$IS_PRIMARY" == true ]]; then
