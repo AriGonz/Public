@@ -3,12 +3,12 @@ set -e
 # =====================================================
 #
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-setup-netmox.sh)"
-# Version .06
+# Version .07
 # =====================================================
 
 # Fancy header banner
 echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
-echo -e "\e[34m║              pve-setup-netmox.sh (v0.06)                     ║\e[0m"
+echo -e "\e[34m║              pve-setup-netmox.sh (v0.07)                     ║\e[0m"
 echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
 echo -e "\e[34m║      Proxmox Cluster Setup over NetBird                      ║\e[0m"
 echo -e "\e[34m╚══════════════════════════════════════════════════════════════╝\e[0m"
@@ -78,9 +78,22 @@ prepare() {
   sed -i '/# Netmox NetBird Cluster/d' /etc/hosts
   sed -i '/\.netbird\.selfhosted/d' /etc/hosts 2>/dev/null || true
 
+  # Remove stale short-hostname entries (e.g. "10.0.4.77 pve-01.xxx pve-01") so
+  # pvecm resolves node names to NetBird IPs instead of stale LAN addresses.
+  for node in "${NODES[@]}"; do
+    short="${node%%.*}"
+    sed -i "/[[:space:]]${short}[[:space:]]/d;/[[:space:]]${short}$/d" /etc/hosts 2>/dev/null || true
+  done
+
   echo "# Netmox NetBird Cluster" >> /etc/hosts
   for node in "${NODES[@]}"; do
-    ip=$(resolve_ip "$node")
+    # Use the known local IP directly for this node to avoid resolve_ip failing
+    # on the local node and leaving a stale address in place.
+    if [[ "$node" == "$THIS_NODE" ]]; then
+      ip="$MY_IP"
+    else
+      ip=$(resolve_ip "$node")
+    fi
     if [[ -n "$ip" ]]; then
       short=${node%%.*}
       printf "%-15s %-30s %s\n" "$ip" "$node" "$short" >> /etc/hosts
@@ -123,6 +136,14 @@ join() {
   log "This node IP = $MY_IP"
 
   pvecm add "$PRIMARY_IP" --link0 "$MY_IP" || err "pvecm add failed - check errors above"
+
+  # pvecm add can return exit code 0 even when the join fails (it prints
+  # "detected the following error(s)" but exits 0).  Verify the join worked.
+  sleep 2
+  if ! is_clustered; then
+    err "pvecm add returned success but node is not part of a cluster. Re-run 'prepare' on this node then retry, or check 'pvecm status' on the primary."
+  fi
+
   log "✅ Successfully joined the cluster!"
   echo ""
   log "Waiting 5 seconds for cluster synchronization..."
