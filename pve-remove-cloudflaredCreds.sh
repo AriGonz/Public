@@ -3,18 +3,19 @@
 # Run as root
 #
 # Use at your own risk — backup important files first!
-# Run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-remove-cloudflaredCreds.sh)"
-# Flow: Uninstall & clean → systemd refresh → Reinstall package (official repo) → systemd refresh + start → final instructions
+# Run as root: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-remove-cloudflaredCreds.sh)"
+# Version: .01
 
 set -euo pipefail
-echo "===================================================="
-echo "     Version .01                                  "
-echo "===================================================="
 
-
+# Quick root check
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: This script must be run as root"
+    exit 1
+fi
 
 echo "===================================================="
-echo "     Cloudflared Reset + Reinstall Script (Root)"
+echo " Cloudflared Reset + Reinstall Script Version .01"
 echo "===================================================="
 echo "This will:"
 echo "  - Stop/uninstall existing service & clean credentials"
@@ -42,7 +43,7 @@ cloudflared service uninstall >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/cloudflared.service
 rm -f /etc/systemd/system/cloudflared@*.service
 
-# Remove repo files & keys (both old and current names)
+# Remove repo files & keys (both old and current)
 rm -f /etc/apt/sources.list.d/cloudflared.list
 rm -f /usr/share/keyrings/cloudflare-public-v2.gpg
 rm -f /usr/share/keyrings/cloudflare-main.gpg
@@ -103,7 +104,7 @@ echo "1. Authenticate with Cloudflare (if needed):"
 echo "   cloudflared tunnel login"
 echo "   # (browser will open → log in)"
 echo ""
-echo "2. Set up the tunnel (you choose one):"
+echo "2. Set up the tunnel (choose one):"
 echo ""
 echo "   OPTION A – Token (recommended, headless):"
 echo "     • Go to: https://one.dash.cloudflare.com → Zero Trust → Networks → Tunnels"
