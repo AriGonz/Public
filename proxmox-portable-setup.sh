@@ -1,9 +1,35 @@
 #!/bin/bash
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
-# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)"
-# Version .54
+# Usage: bash -c "https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh"
+# Version .55
 # =====================================================
+
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                  USER CONFIGURATION                          ║
+# ╟──────────────────────────────────────────────────────────────╢
+# ║  Edit these values before running on a new deployment        ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+# Setup script URL — printed at the end for easy copy to next node
+SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh"
+
+# SSH public key(s) — added to /root/.ssh/authorized_keys
+# Add multiple keys as separate entries in the array
+SSH_KEYS=(
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHgzljgx9gDLlln3EEE/vcPvr9NMz7kLiLraofNzeQoO pve-xx"
+)
+
+# Netbird management server URL
+NETBIRD_URL="https://netbird.arigonz.com"
+
+# Your domain (used for Cloudflared tunnel URL and MOTD display)
+USER_DOMAIN_DEFAULT="arigonz.com"
+
+# Default hostname prefix — shown as suggestion during setup (e.g. pve-00, pve-01)
+HOSTNAME_PREFIX="pve"
+
+
 
 set -e
 
@@ -11,7 +37,7 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC
 
 # ── Version Banner ──────────────────────────────────
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.54${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.55${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 step() { echo -e "\n${BLUE}═══ $1 ${NC}"; }
@@ -151,7 +177,7 @@ if [[ "$PING_OK" == false ]]; then
     echo ""
     warn "Internet connectivity check failed."
     warn "The script will continue but package installs and service downloads may fail."
-    warn "If this node was just moved to a new network, run: bash ~/pve-net-recover.sh"
+    warn "If this node was just moved to a new network, run: dhclient vmbr0"
     echo ""
     read -rp "$(echo -e "${YELLOW}Continue anyway? (y/N): ${NC}")" NET_CONTINUE
     [[ "${NET_CONTINUE,,}" != "y" ]] && die "Aborted — fix network connectivity and re-run"
@@ -159,7 +185,9 @@ fi
 
 
 mkdir -p /root/.ssh
-echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHgzljgx9gDLlln3EEE/vcPvr9NMz7kLiLraofNzeQoO pve-xx" >> /root/.ssh/authorized_keys
+for key in "${SSH_KEYS[@]}"; do
+    grep -qF "$key" /root/.ssh/authorized_keys 2>/dev/null || echo "$key" >> /root/.ssh/authorized_keys
+done
 chmod 600 /root/.ssh/authorized_keys
 echo 'alias ll="ls -lrt"' >> /root/.bashrc
 
@@ -181,8 +209,8 @@ else
     warn "Could not detect FQDN from /etc/hosts — please enter manually"
     read -p "Hostname [$(hostname)]: " NEWHOST
     NEWHOST="${NEWHOST:-$(hostname)}"
-    read -p "Your domain (e.g. arigonz.com): " USER_DOMAIN
-    USER_DOMAIN="${USER_DOMAIN:-}"
+    read -p "Your domain (e.g. ${USER_DOMAIN_DEFAULT}): " USER_DOMAIN
+    USER_DOMAIN="${USER_DOMAIN:-${USER_DOMAIN_DEFAULT}}"
 fi
 
 hostnamectl set-hostname "$NEWHOST" && echo "$NEWHOST" > /etc/hostname
@@ -200,12 +228,6 @@ success "Detected FQDN: ${NEWHOST}.${USER_DOMAIN} — config saved"
 step "PHASE 2 — Proxmox Post-Install"
 apt-get full-upgrade -y && apt-get autoremove -y
 apt-get install -y htop curl git jq wget ufw
-
-# Download network recovery script
-curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-net-recover.sh \
-    -o /root/pve-net-recover.sh
-chmod +x /root/pve-net-recover.sh
-success "Network recovery script downloaded to /root — run 'bash ~/pve-net-recover.sh' if node doesn't pick up IP"
 
 success "System upgraded"
 
@@ -242,7 +264,7 @@ if [[ "${NETBIRD_DO_SETUP:-false}" == true ]]; then
     echo -e "Connecting to Netbird management server..."
     # Run netbird up in background and capture output for the auth URL
     NETBIRD_LOG=$(mktemp /tmp/netbird-XXXXX.log)
-    netbird up --management-url https://netbird.arigonz.com > "$NETBIRD_LOG" 2>&1 &
+    netbird up --management-url ${NETBIRD_URL} > "$NETBIRD_LOG" 2>&1 &
 
     # Wait 10s for netbird up to print the auth URL
     echo -e "Waiting 10s for Netbird to initialize..."
@@ -264,7 +286,7 @@ if [[ "${NETBIRD_DO_SETUP:-false}" == true ]]; then
         echo -e "${BCYAN}${BOLD}  ${NETBIRD_AUTH_URL}${NC}"
     else
         echo -e "${BWHITE}${BOLD}  Run 'netbird status' to get your authorization URL${NC}"
-        echo -e "${BWHITE}${BOLD}  Management URL: ${BCYAN}https://netbird.arigonz.com${NC}"
+        echo -e "${BWHITE}${BOLD}  Management URL: ${BCYAN}${NETBIRD_URL}${NC}"
     fi
     echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -429,30 +451,6 @@ echo "$(date): rules updated for:$SUBNETS" >> "$LOG"
 LAN_SCRIPT
 chmod +x /usr/local/bin/ufw-lan-refresh
 
-# Boot service — runs pve-net-recover.sh on every reboot to ensure DHCP lease
-# is acquired before ufw-lan-refresh tries to detect the subnet.
-cat > /etc/systemd/system/pve-net-boot.service << 'SVC'
-[Unit]
-Description=Proxmox Portable — DHCP renewal and network recovery on boot
-After=network.target
-Before=ufw-lan-refresh.service netbird-tty-refresh.service
-Wants=network.target
-
-[Service]
-Type=oneshot
-# Run non-interactively — skip prompts, just do DHCP + UFW, no user input
-ExecStart=/bin/bash -c '/root/pve-net-recover.sh --auto 2>&1 | tee -a /var/log/pve-net-boot.log'
-RemainAfterExit=no
-# Allow enough time for DHCP retry loop (up to 60s) plus fixes
-TimeoutStartSec=120
-
-[Install]
-WantedBy=multi-user.target
-SVC
-
-systemctl daemon-reload
-systemctl enable pve-net-boot.service
-success "pve-net-boot service enabled — will run DHCP renewal on every reboot"
 
 cat > /etc/systemd/system/ufw-lan-refresh.service << 'SVC'
 [Unit]
@@ -850,14 +848,14 @@ EOF
 fi
 
 step "PHASE 8 — Complete"
-echo -e "\n${GREEN}SETUP COMPLETE! (v0.54)${NC}"
+echo -e "\n${GREEN}SETUP COMPLETE! (v0.55)${NC}"
 if [[ "$NETBIRD_CONNECTED" == false ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
 fi
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}  To run on the next node, use:${NC}"
-echo -e "${CYAN}  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/proxmox-portable-setup.sh)\"${NC}"
+echo -e "${CYAN}  bash -c \"\$(curl -fsSL ${SETUP_SCRIPT_URL})\"${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 read -p "Reboot now? (y/N): " REBOOT
 [[ "$REBOOT" =~ ^[Yy]$ ]] && reboot
