@@ -24,6 +24,12 @@ EOF
 header_info
 echo -e "\n Loading..."
 
+# === VISUAL VERSION .01 + SLEEP 2s (as requested) ===
+echo -e "\n${BOLD}${GN}══════════════════════════════════════${CL}"
+echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.01${CL}"
+echo -e "${BOLD}${GN}══════════════════════════════════════${CL}\n"
+sleep 2
+
 GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
 METHOD=""
 NSAPP="pdm-vm"
@@ -60,7 +66,7 @@ DEFAULT="${TAB}⚙️${TAB}${CL}"
 GATEWAY="${TAB}🌐${TAB}${CL}"
 CONTAINERTYPE="${TAB}📦${TAB}${CL}"
 
-THIN=",discard=on,ssd=1,"          # ← FIXED: leading comma
+THIN=",discard=on,ssd=1,"
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -170,7 +176,7 @@ function default_settings() {
   DISK_SIZE="32G"
   DISK_CACHE=""
   HN="pdm"
-  CPU_TYPE=""          # will be "-cpu xxx" only if advanced sets it
+  CPU_TYPE=""
   CORE_COUNT="4"
   RAM_SIZE="8192"
   BRG="vmbr0"
@@ -198,8 +204,6 @@ function default_settings() {
 function advanced_settings() {
   METHOD="advanced"
   [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
-  # VMID, Machine, Disk Size, Cache, Hostname, CPU Model, Cores, RAM, Bridge, MAC, VLAN, MTU, Start VM – full block from original ubuntu script (adapted)
-  # (I copied the exact structure from tteck’s script – only defaults and title changed)
   while true; do
     if VMID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Virtual Machine ID" 8 58 $VMID --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
       if [ -z "$VMID" ]; then VMID=$(get_valid_nextid); fi
@@ -292,7 +296,7 @@ else
 fi
 msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
 
-# === LOCAL ISO CHECK (unchanged – your request) ===
+# === LOCAL ISO CHECK ===
 ISO="proxmox-datacenter-manager_1.0-2.iso"
 ISO_DIR="/var/lib/vz/template/iso"
 ISO_PATH="${ISO_DIR}/${ISO}"
@@ -314,19 +318,19 @@ else
   exit 1
 fi
 
-# === VM CREATION – FIXED DISK LINE + CORRECT CPU/BIOS ===
+# === VM CREATION ===
 msg_info "Creating Proxmox Datacenter Manager VM"
 qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf -cores $CORE_COUNT -memory $RAM_SIZE \
   -name $HN -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci${CPU_TYPE}
 
 qm set $VMID -efidisk0 ${STORAGE}:1${FORMAT} >/dev/null
-qm set $VMID -scsi0 ${STORAGE}:0,size=${DISK_SIZE}${DISK_CACHE}${THIN} >/dev/null   # ← NOW CORRECT
+qm set $VMID -scsi0 ${STORAGE}:0,size=${DISK_SIZE}${DISK_CACHE}${THIN} >/dev/null
 qm set $VMID -ide2 local:iso/${ISO},media=cdrom >/dev/null
 qm set $VMID -boot order=ide2\;scsi0 >/dev/null
 
 DESCRIPTION=$(cat <<'EOF'
 <h1>Proxmox Datacenter Manager 1.0</h1>
-<p>Created with tteck/community-scripts style helper.</p>
+<p>Created with tteck/community-scripts style helper (v.01).</p>
 <p><b>Next step:</b> Start the VM → open console → run the graphical installer (choose scsi0).</p>
 <p>Web UI: <b>https://VM-IP:8443</b></p>
 EOF
