@@ -3,36 +3,11 @@
 # Copyright (c) 2021-2026 tteck
 # Author: tteck (tteckster) - adapted by Grok for PDM
 # License: MIT
-# Script Version: .09
+# Script Version: .11
 
 source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
 
-function header_info {
-  clear
-  cat <<"EOF"
-   ____  ____  __  __  ____   ___   ____  _____  __  __ 
-  |  _ \|  _ \|  \/  |/ ___| / _ \ / ___|| ____| \ \/ / 
-  | |_) | | | | |\/| | |     | | | |\___ \|  _|    \  /  
-  |  __/| |_| | |  | | |___  | |_| | ___) | |___   /  \  
-  |_|   |____/|_|  |_|\____|  \___/ |____/|_____| /_/\_\ 
-
-         Datacenter Manager 1.0 VM Creator
-EOF
-}
-header_info
-echo -e "\n Loading..."
-
-echo -e "\n${BOLD}${GN}══════════════════════════════════════${CL}"
-echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.09${CL}"
-echo -e "${BOLD}${GN}══════════════════════════════════════${CL}\n"
-sleep 2
-
-GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
-METHOD=""
-NSAPP="pdm-vm"
-var_os="proxmox"
-var_version="datacenter-manager"
-
+# ==================== COLORS & FORMATTING (moved to top - Claude fix #1) ====================
 YW=$(echo "\033[33m")
 BL=$(echo "\033[36m")
 RD=$(echo "\033[01;31m")
@@ -62,6 +37,32 @@ ADVANCED="${TAB}🧩${TAB}${CL}"
 DEFAULT="${TAB}⚙️${TAB}${CL}"
 GATEWAY="${TAB}🌐${TAB}${CL}"
 CONTAINERTYPE="${TAB}📦${TAB}${CL}"
+
+function header_info {
+  clear
+  cat <<"EOF"
+   ____  ____  __  __  ____   ___   ____  _____  __  __ 
+  |  _ \|  _ \|  \/  |/ ___| / _ \ / ___|| ____| \ \/ / 
+  | |_) | | | | |\/| | |     | | | |\___ \|  _|    \  /  
+  |  __/| |_| | |  | | |___  | |_| | ___) | |___   /  \  
+  |_|   |____/|_|  |_|\____|  \___/ |____/|_____| /_/\_\ 
+
+         Datacenter Manager 1.0 VM Creator
+EOF
+}
+header_info
+echo -e "\n Loading..."
+
+echo -e "\n${BOLD}${GN}══════════════════════════════════════${CL}"
+echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.11${CL}"
+echo -e "${BOLD}${GN}══════════════════════════════════════${CL}\n"
+sleep 2
+
+GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
+METHOD=""
+NSAPP="pdm-vm"
+var_os="proxmox"
+var_version="datacenter-manager"
 
 THIN=",discard=on,ssd=1"
 
@@ -200,7 +201,6 @@ function default_settings() {
 }
 
 function advanced_settings() {
-  # (full advanced block from previous versions – unchanged and working)
   METHOD="advanced"
   [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
   while true; do
@@ -213,8 +213,49 @@ function advanced_settings() {
       break
     else exit-script; fi
   done
-  # ... (the rest of advanced_settings is the same as in .08 – machine type, disk size, cache, hostname, etc.)
-  # If you need the full block again let me know, but default settings are recommended and working.
+
+  if MACH=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "MACHINE TYPE" --radiolist --cancel-button Exit-Script "Choose Type" 10 58 2 \
+    "i440fx" "Machine i440fx" ON \
+    "q35" "Machine q35" OFF 3>&1 1>&2 2>&3); then
+    if [ "$MACH" = q35 ]; then
+      FORMAT=""; MACHINE=" -machine q35"
+    else
+      FORMAT=",efitype=4m"; MACHINE=""
+    fi
+    echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}$MACH${CL}"
+  else exit-script; fi
+
+  DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Disk Size (e.g. 32G)" 8 58 "32G" --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  echo -e "${DISKSIZE}${BOLD}${DGN}Disk Size: ${BGN}${DISK_SIZE}${CL}"
+
+  if DISK_CACHE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "DISK CACHE" --radiolist --cancel-button Exit-Script "Choose Cache" 12 58 5 \
+    "none" "No caching" ON \
+    "writeback" "Writeback" OFF \
+    "writethrough" "Writethrough" OFF \
+    "directsync" "Directsync" OFF \
+    "unsafe" "Unsafe" OFF 3>&1 1>&2 2>&3); then
+    [ "$DISK_CACHE" != "none" ] && DISK_CACHE=",cache=$DISK_CACHE" || DISK_CACHE=""
+    echo -e "${DISKSIZE}${BOLD}${DGN}Disk Cache: ${BGN}${DISK_CACHE:-None}${CL}"
+  else exit-script; fi
+
+  HN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 "pdm" --title "HOSTNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  echo -e "${HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}$HN${CL}"
+
+  CPU_MODEL=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "CPU Model (blank = kvm64)" 8 58 "" --title "CPU MODEL" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  [ -n "$CPU_MODEL" ] && CPU_TYPE=" -cpu $CPU_MODEL" || CPU_TYPE=""
+  echo -e "${OS}${BOLD}${DGN}CPU Model: ${BGN}${CPU_MODEL:-kvm64}${CL}"
+
+  CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "CPU Cores" 8 58 "4" --title "CPU CORES" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "RAM Size (MiB)" 8 58 "8192" --title "RAM SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Bridge" 8 58 "vmbr0" --title "BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  MAC=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "MAC Address (blank = random)" 8 58 "$GEN_MAC" --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  VLAN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "VLAN Tag (blank = none)" 8 58 "" --title "VLAN" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  [ -n "$VLAN" ] && VLAN=",tag=$VLAN"
+  MTU=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "MTU (blank = default)" 8 58 "" --title "MTU" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  [ -n "$MTU" ] && MTU=",mtu=$MTU"
+  if whiptail --backtitle "Proxmox VE Helper Scripts" --title "START VM" --yesno "Start VM when finished?" 10 58; then START_VM="yes"; else START_VM="no"; fi
+
+  echo -e "${CREATING}${BOLD}${DGN}Creating a Proxmox Datacenter Manager VM using the above advanced settings${CL}"
 }
 
 function start_script() {
@@ -231,19 +272,63 @@ pve_check
 ssh_check
 start_script
 
+# === FULL STORAGE SELECTION (Claude fix #3) ===
 msg_info "Validating Storage"
-# (storage selection block unchanged – working)
+STORAGE_MENU=()
+MSG_MAX_LENGTH=0
+while read -r line; do
+  TAG=$(echo $line | awk '{print $1}')
+  TYPE=$(echo $line | awk '{printf "%-10s", $2}')
+  FREE=$(echo $line | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
+  ITEM="  Type: $TYPE Free: $FREE "
+  OFFSET=2
+  if [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-} ]]; then MSG_MAX_LENGTH=$((${#ITEM} + $OFFSET)); fi
+  STORAGE_MENU+=("$TAG" "$ITEM" "OFF")
+done < <(pvesm status -content images | awk 'NR>1')
+VALID=$(pvesm status -content images | awk 'NR>1')
+if [ -z "$VALID" ]; then msg_error "Unable to detect a valid storage location."; exit
+elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then STORAGE=${STORAGE_MENU[0]}
+else
+  while [ -z "${STORAGE:+x}" ]; do
+    STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pools" --radiolist "Which storage pool would you like to use?" 16 $(($MSG_MAX_LENGTH + 23)) 6 "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
+  done
+fi
+msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
 
-# === LOCAL ISO CHECK (unchanged) ===
-# ... (same as previous)
+# === LOCAL ISO CHECK ===
+ISO="proxmox-datacenter-manager_1.0-2.iso"
+ISO_DIR="/var/lib/vz/template/iso"
+ISO_PATH="${ISO_DIR}/${ISO}"
+SHA256="b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1"
 
-# === MAXIMUM DEBUG + ROBUST CLEANUP ===
+mkdir -p "$ISO_DIR"
+if [[ -f "$ISO_PATH" ]]; then
+  msg_ok "ISO already available locally → ${ISO_PATH}"
+else
+  msg_info "Downloading Proxmox Datacenter Manager 1.0-2 ISO (~1.48 GB)"
+  wget -q --show-progress -O "$ISO_PATH" "https://download.proxmox.com/iso/${ISO}" || { msg_error "Download failed"; exit 1; }
+  msg_ok "ISO downloaded"
+fi
+msg_info "Verifying SHA256 checksum"
+if echo "${SHA256}  ${ISO_PATH}" | sha256sum --check --status; then
+  msg_ok "Checksum OK"
+else
+  msg_error "Checksum failed! Delete ${ISO_PATH} and re-run."
+  exit 1
+fi
+
+# === VM CREATION WITH HEAVY DEBUG (Claude fix #7 + better troubleshooting) ===
 msg_info "Creating Proxmox Datacenter Manager VM"
-echo -e "${TAB}${YW}DEBUG: VMID=${VMID}  Storage=${STORAGE}  Disk=${DISK_SIZE}${CL}"
+echo -e "${TAB}${YW}DEBUG → VMID=${VMID}  Storage=${STORAGE}  Disk=${DISK_SIZE}${CL}"
 
-# Destroy any existing VM with this ID first
+if [ -z "$STORAGE" ]; then
+  msg_error "STORAGE variable is empty! (This should never happen)"
+  exit 1
+fi
+
+# Destroy any existing VM
 if qm status $VMID &>/dev/null; then
-  msg_info "Existing VM $VMID found – destroying it first"
+  msg_info "Existing VM $VMID found – destroying"
   qm destroy $VMID --purge >/dev/null 2>&1 || true
   msg_ok "Old VM destroyed"
 fi
@@ -257,21 +342,14 @@ msg_ok "EFI disk attached"
 
 DISK_NAME="vm-${VMID}-disk-0"
 
-# === SUPER STRONG CLEANUP (this fixes your exact error) ===
-msg_info "DEBUG: Checking LVM for stale disk"
-lvs -o lv_name --noheadings /dev/pve 2>/dev/null | cat
-msg_info "DEBUG: Checking pvesm list"
-pvesm list ${STORAGE} --full 2>/dev/null | cat
-
-msg_info "Forcing removal of any stale disk ${DISK_NAME}"
+msg_info "Forcing cleanup of any stale disk"
 lvremove -f /dev/pve/${DISK_NAME} 2>/dev/null || true
 pvesm free ${STORAGE}:${DISK_NAME} --force 2>/dev/null || true
-msg_ok "Stale disk cleanup completed"
+msg_ok "Stale disk cleanup done"
 
-# === ALLOCATE NEW DISK ===
 msg_info "Pre-allocating ${DISK_SIZE} disk → ${STORAGE}:${DISK_NAME}"
 pvesm alloc ${STORAGE} ${VMID} ${DISK_NAME} ${DISK_SIZE} >/dev/null
-msg_ok "Disk pre-allocated successfully"
+msg_ok "Disk pre-allocated"
 
 qm set $VMID -scsi0 ${STORAGE}:${DISK_NAME}${DISK_CACHE}${THIN} >/dev/null
 msg_ok "SCSI0 disk attached"
@@ -280,7 +358,14 @@ qm set $VMID -ide2 local:iso/${ISO},media=cdrom >/dev/null
 qm set $VMID -boot order=ide2\;scsi0 >/dev/null
 msg_ok "ISO attached and boot order set"
 
-# ... (description + start VM block same as before)
+DESCRIPTION=$(cat <<'EOF'
+<h1>Proxmox Datacenter Manager 1.0</h1>
+<p>Created with tteck/community-scripts style helper (v.11 – FINAL, Claude-reviewed).</p>
+<p><b>Next step:</b> Start the VM → open console → run the graphical installer (choose scsi0).</p>
+<p>Web UI: <b>https://VM-IP:8443</b></p>
+EOF
+)
+qm set $VMID -description "$DESCRIPTION" >/dev/null
 
 msg_ok "VM ${VMID} created successfully!"
 
