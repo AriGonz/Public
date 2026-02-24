@@ -5,7 +5,7 @@
 # License: MIT
 # https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pdm-vm.sh)"
-
+# Script Version: .06
 
 source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
 
@@ -24,8 +24,9 @@ EOF
 header_info
 echo -e "\n Loading..."
 
+# === VISUAL VERSION .06 + SLEEP 2s ===
 echo -e "\n${BOLD}${GN}══════════════════════════════════════${CL}"
-echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.05${CL}"
+echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.06${CL}"
 echo -e "${BOLD}${GN}══════════════════════════════════════${CL}\n"
 sleep 2
 
@@ -64,6 +65,8 @@ ADVANCED="${TAB}🧩${TAB}${CL}"
 DEFAULT="${TAB}⚙️${TAB}${CL}"
 GATEWAY="${TAB}🌐${TAB}${CL}"
 CONTAINERTYPE="${TAB}📦${TAB}${CL}"
+
+THIN=",discard=on,ssd=1"   # Exact tteck format for local-lvm compatibility
 
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
@@ -314,18 +317,26 @@ else
   exit 1
 fi
 
+# === VM CREATION – EXPLICIT VOLUME NAME + pvesm alloc FOR 100% local-lvm COMPATIBILITY ===
 msg_info "Creating Proxmox Datacenter Manager VM"
 qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf -cores $CORE_COUNT -memory $RAM_SIZE \
   -name $HN -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci${CPU_TYPE}
 
 qm set $VMID -efidisk0 ${STORAGE}:1${FORMAT} >/dev/null
-qm set $VMID -scsi0 ${STORAGE}:0,size=${DISK_SIZE}${DISK_CACHE},discard=on,ssd=1 >/dev/null
+
+# Pre-allocate the main disk explicitly (fixes virtualsize=0 / lvcreate error on local-lvm)
+DISK_NAME="vm-${VMID}-disk-0"
+msg_info "Pre-allocating ${DISK_SIZE} disk on ${STORAGE}"
+pvesm alloc ${STORAGE} ${VMID} ${DISK_NAME} ${DISK_SIZE} >/dev/null
+msg_ok "Disk pre-allocated as ${STORAGE}:${DISK_NAME}"
+
+qm set $VMID -scsi0 ${STORAGE}:${DISK_NAME}${DISK_CACHE}${THIN} >/dev/null
 qm set $VMID -ide2 local:iso/${ISO},media=cdrom >/dev/null
 qm set $VMID -boot order=ide2\;scsi0 >/dev/null
 
 DESCRIPTION=$(cat <<'EOF'
 <h1>Proxmox Datacenter Manager 1.0</h1>
-<p>Created with tteck/community-scripts style helper (v.05 – final).</p>
+<p>Created with tteck/community-scripts style helper (v.06 – final).</p>
 <p><b>Next step:</b> Start the VM → open console → run the graphical installer (choose scsi0).</p>
 <p>Web UI: <b>https://VM-IP:8443</b></p>
 EOF
