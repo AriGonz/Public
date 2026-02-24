@@ -6,11 +6,6 @@
 # https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pdm-vm.sh)"
 
-# === VISUAL VERSION .01 + SLEEP 2s (as requested) ===
-echo -e "\n${BOLD}${GN}══════════════════════════════════════${CL}"
-echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.01${CL}"
-echo -e "${BOLD}${GN}══════════════════════════════════════${CL}\n"
-sleep 2
 
 source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
 
@@ -29,9 +24,9 @@ EOF
 header_info
 echo -e "\n Loading..."
 
-# === VISUAL VERSION .01 + SLEEP 2s (as requested) ===
+# === VISUAL VERSION .02 + SLEEP 2s ===
 echo -e "\n${BOLD}${GN}══════════════════════════════════════${CL}"
-echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.01${CL}"
+echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.02${CL}"
 echo -e "${BOLD}${GN}══════════════════════════════════════${CL}\n"
 sleep 2
 
@@ -71,7 +66,6 @@ DEFAULT="${TAB}⚙️${TAB}${CL}"
 GATEWAY="${TAB}🌐${TAB}${CL}"
 CONTAINERTYPE="${TAB}📦${TAB}${CL}"
 
-THIN=",discard=on,ssd=1,"
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -323,19 +317,19 @@ else
   exit 1
 fi
 
-# === VM CREATION ===
+# === VM CREATION (FIXED for local-lvm) ===
 msg_info "Creating Proxmox Datacenter Manager VM"
 qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf -cores $CORE_COUNT -memory $RAM_SIZE \
   -name $HN -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci${CPU_TYPE}
 
 qm set $VMID -efidisk0 ${STORAGE}:1${FORMAT} >/dev/null
-qm set $VMID -scsi0 ${STORAGE}:0,size=${DISK_SIZE}${DISK_CACHE}${THIN} >/dev/null
+qm set $VMID -scsi0 ${STORAGE}:${DISK_SIZE}${DISK_CACHE},discard=on,ssd=1 >/dev/null   # ← FIXED: correct syntax for LVM + directory storage
 qm set $VMID -ide2 local:iso/${ISO},media=cdrom >/dev/null
 qm set $VMID -boot order=ide2\;scsi0 >/dev/null
 
 DESCRIPTION=$(cat <<'EOF'
 <h1>Proxmox Datacenter Manager 1.0</h1>
-<p>Created with tteck/community-scripts style helper (v.01).</p>
+<p>Created with tteck/community-scripts style helper (v.02).</p>
 <p><b>Next step:</b> Start the VM → open console → run the graphical installer (choose scsi0).</p>
 <p>Web UI: <b>https://VM-IP:8443</b></p>
 EOF
