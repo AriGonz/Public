@@ -2,7 +2,12 @@
 # =============================================================================
 # setup-pdm-vm.sh
 # Proxmox Datacenter Manager (PDM) VM Setup Script
-# Runs ON the PVE host (9.1.1+) as root
+# Runs ON the PVE host (9.1.6+) as root
+#
+# RECOMMENDED usage (save then run — do NOT pipe via bash -c):
+#   wget -O setup-pdm-vm.sh https://raw.githubusercontent.com/.../pdm-vm.sh
+#   chmod +x setup-pdm-vm.sh
+#   ./setup-pdm-vm.sh
 #
 # What this script does:
 #   1. Checks for the PDM ISO locally, downloads it if missing
@@ -13,7 +18,7 @@
 #
 # Requirements:
 #   - Run as root on the PVE host
-#   - xorriso installed (for ISO repack): apt install xorriso
+#   - xorriso installed (for ISO repack): apt install xorriso wget
 #   - Your self-hosted Netbird management URL and setup key
 # =============================================================================
 
@@ -23,7 +28,7 @@ set -euo pipefail
 # !! CONFIGURE THESE BEFORE RUNNING !!
 # =============================================================================
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="0.1"
 
 # --- VM Settings ---
 VM_ID=200                          # Change if 200 is already taken
@@ -59,7 +64,7 @@ NETBIRD_SETUP_KEY=""   # Leave blank — script will prompt you securely at runt
 # Since we're using DHCP we wait for the VM to appear and grab its IP.
 # Alternatively set this manually if you know it.
 PDM_SSH_USER="root"
-SSH_WAIT_SECONDS=300               # How long to wait for PDM to boot (seconds)
+SSH_WAIT_SECONDS=600               # How long to wait for PDM to boot (seconds)
 SSH_RETRY_INTERVAL=10
 
 # =============================================================================
@@ -105,9 +110,10 @@ prompt_netbird_key() {
         fi
     done
 
-    # Basic format sanity check (Netbird keys are UUID-like)
-    if [[ ! "${key}" =~ ^[A-Za-z0-9]{8}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{12}$ ]]; then
-        warn "Key format looks unusual (expected UUID format). Continuing anyway..."
+    # Validate UUID format (8-4-4-4-12 hex, upper or lowercase)
+    if [[ ! "${key}" =~ ^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}$ ]]; then
+        warn "Key format looks unusual (expected format: 9461387A-7F5E-4E2F-9489-EC70F0C17480)."
+        warn "Double-check it in your Netbird dashboard. Continuing anyway..."
     fi
 
     NETBIRD_SETUP_KEY="${key}"
@@ -237,22 +243,52 @@ EOF
     fi
 
     # Repack ISO
+    # Detect which boot catalog path exists in the extracted ISO
     info "Repacking ISO with answer file (this may take a moment)..."
-    xorriso -as mkisofs \
-        -r -V "PDM_AUTO" \
-        -b isolinux/isolinux.bin \
-        -c isolinux/boot.cat \
-        -no-emul-boot -boot-load-size 4 -boot-info-table \
-        -eltorito-alt-boot \
-        -e boot/grub/efi.img \
-        -no-emul-boot \
-        -isohybrid-gpt-basdat \
-        -o "${answer_iso}" \
-        "${extract_dir}" \
-        &>/dev/null || {
-            warn "ISO repack failed — falling back to original ISO (manual install required)."
-            cp "${original_iso}" "${answer_iso}"
-        }
+    local boot_catalog=""
+    local boot_image=""
+    local repack_log="${work_dir}/xorriso.log"
+
+    if [[ -f "${extract_dir}/isolinux/isolinux.bin" ]]; then
+        boot_catalog="isolinux/boot.cat"
+        boot_image="isolinux/isolinux.bin"
+    elif [[ -f "${extract_dir}/boot/grub/i386-pc/eltorito.img" ]]; then
+        boot_catalog="boot/grub/i386-pc/boot.cat"
+        boot_image="boot/grub/i386-pc/eltorito.img"
+    fi
+
+    local xorriso_args=( -as mkisofs -r -V "PDM_AUTO" )
+
+    if [[ -n "${boot_image}" ]]; then
+        xorriso_args+=(
+            -b "${boot_image}"
+            -c "${boot_catalog}"
+            -no-emul-boot -boot-load-size 4 -boot-info-table
+        )
+    fi
+
+    # Always include EFI boot if present
+    if [[ -f "${extract_dir}/boot/grub/efi.img" ]]; then
+        xorriso_args+=(
+            -eltorito-alt-boot
+            -e boot/grub/efi.img
+            -no-emul-boot
+            -isohybrid-gpt-basdat
+        )
+    fi
+
+    xorriso_args+=( -o "${answer_iso}" "${extract_dir}" )
+
+    if xorriso "${xorriso_args[@]}" >"${repack_log}" 2>&1; then
+        success "ISO repacked successfully with answer file."
+    else
+        warn "ISO repack failed. xorriso output:"
+        tail -5 "${repack_log}" | while IFS= read -r line; do
+            warn "  ${line}"
+        done
+        warn "Falling back to original ISO — manual install will be required."
+        cp "${original_iso}" "${answer_iso}"
+    fi
 
     rm -rf "${work_dir}"
     success "Unattended ISO ready: ${answer_iso}"
@@ -346,7 +382,7 @@ get_vm_ip() {
     echo "[WARN]  The install may still be running. Options:" >&2
     echo "[WARN]    1. Check PVE web UI > VM ${VM_ID} > Console to see installer progress" >&2
     echo "[WARN]    2. Check your DHCP server for a lease assigned to '${VM_NAME}'" >&2
-    echo "[WARN]    3. Once booted, run:  $0 netbird <PDM_IP>" >&2
+    echo "[WARN]    3. Once booted, run:  ./setup-pdm-vm.sh netbird <PDM_IP>" >&2
     echo ""
 }
 
@@ -449,6 +485,21 @@ main() {
     echo -e "${BLUE}  PVE Host Automation (requires PVE 9.1.6+) ${NC}"
     echo -e "${BLUE}=============================================${NC}"
     echo ""
+
+    # Warn if being piped through bash -c (causes script body to echo to terminal)
+    if [[ "$0" == "bash" || "$0" == "-bash" || "$0" == "/bin/bash" ]]; then
+        echo -e "${YELLOW}[WARN]${NC}  Detected: running via 'bash -c \$(curl ...)'"
+        echo -e "${YELLOW}[WARN]${NC}  This causes the script body to print to your terminal."
+        echo -e "${YELLOW}[WARN]${NC}  Recommended usage instead:"
+        echo ""
+        echo "    wget -O setup-pdm-vm.sh <URL>"
+        echo "    chmod +x setup-pdm-vm.sh"
+        echo "    ./setup-pdm-vm.sh"
+        echo ""
+        echo -e "${YELLOW}[WARN]${NC}  Continuing anyway in 5 seconds..."
+        sleep 5
+        echo ""
+    fi
 
     case "${1:-full}" in
         full)
