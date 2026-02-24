@@ -1,382 +1,428 @@
 #!/usr/bin/env bash
+# =============================================================================
+# setup-pdm-vm.sh
+# Proxmox Datacenter Manager (PDM) VM Setup Script
+# Runs ON the PVE host (9.1.1+) as root
+#
+# What this script does:
+#   1. Checks for the PDM ISO locally, downloads it if missing
+#   2. Creates a VM with recommended specs
+#   3. Injects an unattended answer file into the ISO
+#   4. Boots the VM and waits for PDM to come online
+#   5. SSHes into PDM and installs + connects Netbird
+#
+# Requirements:
+#   - Run as root on the PVE host
+#   - xorriso installed (for ISO repack): apt install xorriso
+#   - Your self-hosted Netbird management URL and setup key
+# =============================================================================
 
-# Copyright (c) 2021-2026 tteck
-# Author: tteck (tteckster) - adapted by Grok for PDM
-# License: MIT
-# Script Version: .11
+set -euo pipefail
 
-source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
+# =============================================================================
+# !! CONFIGURE THESE BEFORE RUNNING !!
+# =============================================================================
 
-# ==================== COLORS & FORMATTING (moved to top - Claude fix #1) ====================
-YW=$(echo "\033[33m")
-BL=$(echo "\033[36m")
-RD=$(echo "\033[01;31m")
-BGN=$(echo "\033[4;92m")
-GN=$(echo "\033[1;92m")
-DGN=$(echo "\033[32m")
-CL=$(echo "\033[m")
-BOLD=$(echo "\033[1m")
-BFR="\\r\\033[K"
-HOLD=" "
-TAB="  "
+# --- VM Settings ---
+VM_ID=200                          # Change if 200 is already taken
+VM_NAME="pdm"
+VM_CORES=2
+VM_RAM=4096                        # MB
+VM_DISK_SIZE=32                    # GB
+VM_BRIDGE="vmbr0"                  # Your PVE bridge
+VM_STORAGE="local"                 # ISO storage (local = /var/lib/vz)
+VM_DISK_STORAGE="local-lvm"        # VM disk storage (change if needed e.g. local-zfs)
 
-CM="${TAB}✔️${TAB}${CL}"
-CROSS="${TAB}✖️${TAB}${CL}"
-INFO="${TAB}💡${TAB}${CL}"
-OS="${TAB}🖥️${TAB}${CL}"
-DISKSIZE="${TAB}💾${TAB}${CL}"
-CPUCORE="${TAB}🧠${TAB}${CL}"
-RAMSIZE="${TAB}🛠️${TAB}${CL}"
-CONTAINERID="${TAB}🆔${TAB}${CL}"
-HOSTNAME="${TAB}🏠${TAB}${CL}"
-BRIDGE="${TAB}🌉${TAB}${CL}"
-MACADDRESS="${TAB}🔗${TAB}${CL}"
-VLANTAG="${TAB}🏷️${TAB}${CL}"
-CREATING="${TAB}🚀${TAB}${CL}"
-ADVANCED="${TAB}🧩${TAB}${CL}"
-DEFAULT="${TAB}⚙️${TAB}${CL}"
-GATEWAY="${TAB}🌐${TAB}${CL}"
-CONTAINERTYPE="${TAB}📦${TAB}${CL}"
-
-function header_info {
-  clear
-  cat <<"EOF"
-   ____  ____  __  __  ____   ___   ____  _____  __  __ 
-  |  _ \|  _ \|  \/  |/ ___| / _ \ / ___|| ____| \ \/ / 
-  | |_) | | | | |\/| | |     | | | |\___ \|  _|    \  /  
-  |  __/| |_| | |  | | |___  | |_| | ___) | |___   /  \  
-  |_|   |____/|_|  |_|\____|  \___/ |____/|_____| /_/\_\ 
-
-         Datacenter Manager 1.0 VM Creator
-EOF
-}
-header_info
-echo -e "\n Loading..."
-
-echo -e "\n${BOLD}${GN}══════════════════════════════════════${CL}"
-echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.11${CL}"
-echo -e "${BOLD}${GN}══════════════════════════════════════${CL}\n"
-sleep 2
-
-GEN_MAC=02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')
-METHOD=""
-NSAPP="pdm-vm"
-var_os="proxmox"
-var_version="datacenter-manager"
-
-THIN=",discard=on,ssd=1"
-
-set -e
-trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
-trap cleanup EXIT
-trap 'post_update_to_api "failed" "130"' SIGINT
-trap 'post_update_to_api "failed" "143"' SIGTERM
-trap 'post_update_to_api "failed" "129"; exit 129' SIGHUP
-
-function error_handler() {
-  local exit_code="$?"
-  local line_number="$1"
-  local command="$2"
-  post_update_to_api "failed" "$exit_code"
-  local error_message="${RD}[ERROR]${CL} in line ${RD}$line_number${CL}: exit code ${RD}$exit_code${CL}: while executing command ${YW}$command${CL}"
-  echo -e "\n$error_message\n"
-  cleanup_vmid
-}
-
-function get_valid_nextid() {
-  local try_id
-  try_id=$(pvesh get /cluster/nextid)
-  while true; do
-    if [ -f "/etc/pve/qemu-server/${try_id}.conf" ] || [ -f "/etc/pve/lxc/${try_id}.conf" ]; then
-      try_id=$((try_id + 1))
-      continue
-    fi
-    if lvs --noheadings -o lv_name | grep -qE "(^|[-_])${try_id}($|[-_])"; then
-      try_id=$((try_id + 1))
-      continue
-    fi
-    break
-  done
-  echo "$try_id"
-}
-
-function cleanup_vmid() {
-  if qm status $VMID &>/dev/null; then
-    qm stop $VMID &>/dev/null
-    qm destroy $VMID --purge &>/dev/null || true
-  fi
-}
-
-function cleanup() {
-  local exit_code=$?
-  popd >/dev/null
-  if [[ "${POST_TO_API_DONE:-}" == "true" && "${POST_UPDATE_DONE:-}" != "true" ]]; then
-    if [[ $exit_code -eq 0 ]]; then
-      post_update_to_api "done" "none"
-    else
-      post_update_to_api "failed" "$exit_code"
-    fi
-  fi
-  rm -rf $TEMP_DIR
-}
-
-TEMP_DIR=$(mktemp -d)
-pushd $TEMP_DIR >/dev/null
-
-if whiptail --backtitle "Proxmox VE Helper Scripts" --title "Proxmox Datacenter Manager VM" --yesno "This will create a New Proxmox Datacenter Manager VM. Proceed?" 10 65; then
-  :
-else
-  header_info && echo -e "${CROSS}${RD}User exited script${CL}\n" && exit
-fi
-
-function msg_info() { local msg="$1"; echo -ne "${TAB}${YW}${HOLD}${msg}${HOLD}"; }
-function msg_ok() { local msg="$1"; echo -e "${BFR}${CM}${GN}${msg}${CL}"; }
-function msg_error() { local msg="$1"; echo -e "${BFR}${CROSS}${RD}${msg}${CL}"; }
-
-function check_root() {
-  if [[ "$(id -u)" -ne 0 || $(ps -o comm= -p $PPID) == "sudo" ]]; then
-    clear; msg_error "Please run this script as root."; echo -e "\nExiting..."; sleep 2; exit
-  fi
-}
-
-pve_check() {
-  local PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
-  if [[ "$PVE_VER" =~ ^8\.([0-9]+) && "${BASH_REMATCH[1]}" -le 9 ]] || [[ "$PVE_VER" =~ ^9\.(0|1) ]]; then
-    return 0
-  fi
-  msg_error "This version of Proxmox VE is not supported."
-  exit 1
-}
-
-function arch_check() {
-  if [ "$(dpkg --print-architecture)" != "amd64" ]; then
-    echo -e "\n ${INFO}This script will not work with PiMox!\n"; exit
-  fi
-}
-
-function ssh_check() {
-  if command -v pveversion >/dev/null && [ -n "${SSH_CLIENT:+x}" ]; then
-    if whiptail --backtitle "Proxmox VE Helper Scripts" --title "SSH DETECTED" --yesno "It's suggested to use the Proxmox shell instead of SSH. Proceed anyway?" 10 62; then
-      :
-    else
-      exit
-    fi
-  fi
-}
-
-function exit-script() {
-  clear; echo -e "\n${CROSS}${RD}User exited script${CL}\n"; exit
-}
-
-function default_settings() {
-  VMID=$(get_valid_nextid)
-  FORMAT=",efitype=4m"
-  MACHINE=""
-  DISK_SIZE="32G"
-  DISK_CACHE=""
-  HN="pdm"
-  CPU_TYPE=""
-  CORE_COUNT="4"
-  RAM_SIZE="8192"
-  BRG="vmbr0"
-  MAC="$GEN_MAC"
-  VLAN=""
-  MTU=""
-  START_VM="yes"
-  METHOD="default"
-  echo -e "${CONTAINERID}${BOLD}${DGN}Virtual Machine ID: ${BGN}${VMID}${CL}"
-  echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}i440fx${CL}"
-  echo -e "${DISKSIZE}${BOLD}${DGN}Disk Size: ${BGN}${DISK_SIZE}${CL}"
-  echo -e "${DISKSIZE}${BOLD}${DGN}Disk Cache: ${BGN}None${CL}"
-  echo -e "${HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}${HN}${CL}"
-  echo -e "${OS}${BOLD}${DGN}CPU Model: ${BGN}KVM64${CL}"
-  echo -e "${CPUCORE}${BOLD}${DGN}CPU Cores: ${BGN}${CORE_COUNT}${CL}"
-  echo -e "${RAMSIZE}${BOLD}${DGN}RAM Size: ${BGN}${RAM_SIZE}${CL}"
-  echo -e "${BRIDGE}${BOLD}${DGN}Bridge: ${BGN}${BRG}${CL}"
-  echo -e "${MACADDRESS}${BOLD}${DGN}MAC Address: ${BGN}${MAC}${CL}"
-  echo -e "${VLANTAG}${BOLD}${DGN}VLAN: ${BGN}Default${CL}"
-  echo -e "${DEFAULT}${BOLD}${DGN}Interface MTU Size: ${BGN}Default${CL}"
-  echo -e "${GATEWAY}${BOLD}${DGN}Start VM when completed: ${BGN}yes${CL}"
-  echo -e "${CREATING}${BOLD}${DGN}Creating a Proxmox Datacenter Manager VM using the above default settings${CL}"
-}
-
-function advanced_settings() {
-  METHOD="advanced"
-  [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
-  while true; do
-    if VMID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Virtual Machine ID" 8 58 $VMID --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-      if [ -z "$VMID" ]; then VMID=$(get_valid_nextid); fi
-      if pct status "$VMID" &>/dev/null || qm status "$VMID" &>/dev/null; then
-        echo -e "${CROSS}${RD} ID $VMID is already in use${CL}"; sleep 2; continue
-      fi
-      echo -e "${CONTAINERID}${BOLD}${DGN}Virtual Machine ID: ${BGN}$VMID${CL}"
-      break
-    else exit-script; fi
-  done
-
-  if MACH=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "MACHINE TYPE" --radiolist --cancel-button Exit-Script "Choose Type" 10 58 2 \
-    "i440fx" "Machine i440fx" ON \
-    "q35" "Machine q35" OFF 3>&1 1>&2 2>&3); then
-    if [ "$MACH" = q35 ]; then
-      FORMAT=""; MACHINE=" -machine q35"
-    else
-      FORMAT=",efitype=4m"; MACHINE=""
-    fi
-    echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}$MACH${CL}"
-  else exit-script; fi
-
-  DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Disk Size (e.g. 32G)" 8 58 "32G" --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  echo -e "${DISKSIZE}${BOLD}${DGN}Disk Size: ${BGN}${DISK_SIZE}${CL}"
-
-  if DISK_CACHE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "DISK CACHE" --radiolist --cancel-button Exit-Script "Choose Cache" 12 58 5 \
-    "none" "No caching" ON \
-    "writeback" "Writeback" OFF \
-    "writethrough" "Writethrough" OFF \
-    "directsync" "Directsync" OFF \
-    "unsafe" "Unsafe" OFF 3>&1 1>&2 2>&3); then
-    [ "$DISK_CACHE" != "none" ] && DISK_CACHE=",cache=$DISK_CACHE" || DISK_CACHE=""
-    echo -e "${DISKSIZE}${BOLD}${DGN}Disk Cache: ${BGN}${DISK_CACHE:-None}${CL}"
-  else exit-script; fi
-
-  HN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 "pdm" --title "HOSTNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  echo -e "${HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}$HN${CL}"
-
-  CPU_MODEL=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "CPU Model (blank = kvm64)" 8 58 "" --title "CPU MODEL" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  [ -n "$CPU_MODEL" ] && CPU_TYPE=" -cpu $CPU_MODEL" || CPU_TYPE=""
-  echo -e "${OS}${BOLD}${DGN}CPU Model: ${BGN}${CPU_MODEL:-kvm64}${CL}"
-
-  CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "CPU Cores" 8 58 "4" --title "CPU CORES" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "RAM Size (MiB)" 8 58 "8192" --title "RAM SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Bridge" 8 58 "vmbr0" --title "BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  MAC=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "MAC Address (blank = random)" 8 58 "$GEN_MAC" --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  VLAN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "VLAN Tag (blank = none)" 8 58 "" --title "VLAN" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  [ -n "$VLAN" ] && VLAN=",tag=$VLAN"
-  MTU=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "MTU (blank = default)" 8 58 "" --title "MTU" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
-  [ -n "$MTU" ] && MTU=",mtu=$MTU"
-  if whiptail --backtitle "Proxmox VE Helper Scripts" --title "START VM" --yesno "Start VM when finished?" 10 58; then START_VM="yes"; else START_VM="no"; fi
-
-  echo -e "${CREATING}${BOLD}${DGN}Creating a Proxmox Datacenter Manager VM using the above advanced settings${CL}"
-}
-
-function start_script() {
-  if whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "Use Default Settings?" 10 58; then
-    default_settings
-  else
-    advanced_settings
-  fi
-}
-
-check_root
-arch_check
-pve_check
-ssh_check
-start_script
-
-# === FULL STORAGE SELECTION (Claude fix #3) ===
-msg_info "Validating Storage"
-STORAGE_MENU=()
-MSG_MAX_LENGTH=0
-while read -r line; do
-  TAG=$(echo $line | awk '{print $1}')
-  TYPE=$(echo $line | awk '{printf "%-10s", $2}')
-  FREE=$(echo $line | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
-  ITEM="  Type: $TYPE Free: $FREE "
-  OFFSET=2
-  if [[ $((${#ITEM} + $OFFSET)) -gt ${MSG_MAX_LENGTH:-} ]]; then MSG_MAX_LENGTH=$((${#ITEM} + $OFFSET)); fi
-  STORAGE_MENU+=("$TAG" "$ITEM" "OFF")
-done < <(pvesm status -content images | awk 'NR>1')
-VALID=$(pvesm status -content images | awk 'NR>1')
-if [ -z "$VALID" ]; then msg_error "Unable to detect a valid storage location."; exit
-elif [ $((${#STORAGE_MENU[@]} / 3)) -eq 1 ]; then STORAGE=${STORAGE_MENU[0]}
-else
-  while [ -z "${STORAGE:+x}" ]; do
-    STORAGE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "Storage Pools" --radiolist "Which storage pool would you like to use?" 16 $(($MSG_MAX_LENGTH + 23)) 6 "${STORAGE_MENU[@]}" 3>&1 1>&2 2>&3)
-  done
-fi
-msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
-
-# === LOCAL ISO CHECK ===
-ISO="proxmox-datacenter-manager_1.0-2.iso"
+# --- PDM ISO ---
+PDM_ISO_NAME="proxmox-datacenter-manager_1.0-2.iso"
+PDM_ISO_URL="https://enterprise.proxmox.com/iso/${PDM_ISO_NAME}"
+PDM_ISO_SHA256="b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1"
 ISO_DIR="/var/lib/vz/template/iso"
-ISO_PATH="${ISO_DIR}/${ISO}"
-SHA256="b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1"
 
-mkdir -p "$ISO_DIR"
-if [[ -f "$ISO_PATH" ]]; then
-  msg_ok "ISO already available locally → ${ISO_PATH}"
-else
-  msg_info "Downloading Proxmox Datacenter Manager 1.0-2 ISO (~1.48 GB)"
-  wget -q --show-progress -O "$ISO_PATH" "https://download.proxmox.com/iso/${ISO}" || { msg_error "Download failed"; exit 1; }
-  msg_ok "ISO downloaded"
-fi
-msg_info "Verifying SHA256 checksum"
-if echo "${SHA256}  ${ISO_PATH}" | sha256sum --check --status; then
-  msg_ok "Checksum OK"
-else
-  msg_error "Checksum failed! Delete ${ISO_PATH} and re-run."
-  exit 1
-fi
+# --- PDM Unattended Install Settings ---
+PDM_HOSTNAME="pdm"
+PDM_DOMAIN="local"                 # e.g. homelab.local
+PDM_PASSWORD="ChangeMe123!"        # Root password for the PDM system
+PDM_EMAIL="admin@example.com"
+PDM_TIMEZONE="America/Chicago"     # Change to your timezone
+PDM_KEYBOARD="en-us"
+PDM_DISK="sda"                     # Target disk inside VM (usually sda)
+PDM_FILESYSTEM="ext4"              # ext4 or zfs
 
-# === VM CREATION WITH HEAVY DEBUG (Claude fix #7 + better troubleshooting) ===
-msg_info "Creating Proxmox Datacenter Manager VM"
-echo -e "${TAB}${YW}DEBUG → VMID=${VMID}  Storage=${STORAGE}  Disk=${DISK_SIZE}${CL}"
+# --- Netbird Settings ---
+NETBIRD_MANAGEMENT_URL="https://your-netbird-server.example.com:33073"
+NETBIRD_SETUP_KEY="YOUR-SETUP-KEY-HERE"
 
-if [ -z "$STORAGE" ]; then
-  msg_error "STORAGE variable is empty! (This should never happen)"
-  exit 1
-fi
+# --- SSH Settings (used after PDM boots to install Netbird) ---
+# Since we're using DHCP we wait for the VM to appear and grab its IP.
+# Alternatively set this manually if you know it.
+PDM_SSH_USER="root"
+SSH_WAIT_SECONDS=300               # How long to wait for PDM to boot (seconds)
+SSH_RETRY_INTERVAL=10
 
-# Destroy any existing VM
-if qm status $VMID &>/dev/null; then
-  msg_info "Existing VM $VMID found – destroying"
-  qm destroy $VMID --purge >/dev/null 2>&1 || true
-  msg_ok "Old VM destroyed"
-fi
+# =============================================================================
+# Colors & Helpers
+# =============================================================================
 
-qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf -cores $CORE_COUNT -memory $RAM_SIZE \
-  -name $HN -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci${CPU_TYPE}
-msg_ok "Base VM created"
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
-qm set $VMID -efidisk0 ${STORAGE}:1${FORMAT} >/dev/null
-msg_ok "EFI disk attached"
+info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
+success() { echo -e "${GREEN}[OK]${NC}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
+error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-DISK_NAME="vm-${VMID}-disk-0"
+# =============================================================================
+# Preflight Checks
+# =============================================================================
 
-msg_info "Forcing cleanup of any stale disk"
-lvremove -f /dev/pve/${DISK_NAME} 2>/dev/null || true
-pvesm free ${STORAGE}:${DISK_NAME} --force 2>/dev/null || true
-msg_ok "Stale disk cleanup done"
+preflight() {
+    info "Running preflight checks..."
 
-msg_info "Pre-allocating ${DISK_SIZE} disk → ${STORAGE}:${DISK_NAME}"
-pvesm alloc ${STORAGE} ${VMID} ${DISK_NAME} ${DISK_SIZE} >/dev/null
-msg_ok "Disk pre-allocated"
+    [[ $EUID -ne 0 ]] && error "This script must be run as root on the PVE host."
 
-qm set $VMID -scsi0 ${STORAGE}:${DISK_NAME}${DISK_CACHE}${THIN} >/dev/null
-msg_ok "SCSI0 disk attached"
+    command -v qm       &>/dev/null || error "'qm' not found. Are you running this on a PVE host?"
+    command -v wget     &>/dev/null || error "'wget' not found. Install with: apt install wget"
+    command -v xorriso  &>/dev/null || error "'xorriso' not found. Install with: apt install xorriso"
+    command -v sha256sum &>/dev/null || error "'sha256sum' not found."
+    command -v ssh      &>/dev/null || error "'ssh' not found."
 
-qm set $VMID -ide2 local:iso/${ISO},media=cdrom >/dev/null
-qm set $VMID -boot order=ide2\;scsi0 >/dev/null
-msg_ok "ISO attached and boot order set"
+    # Check VM ID is free
+    if qm status "${VM_ID}" &>/dev/null; then
+        error "VM ID ${VM_ID} already exists. Change VM_ID in the script."
+    fi
 
-DESCRIPTION=$(cat <<'EOF'
-<h1>Proxmox Datacenter Manager 1.0</h1>
-<p>Created with tteck/community-scripts style helper (v.11 – FINAL, Claude-reviewed).</p>
-<p><b>Next step:</b> Start the VM → open console → run the graphical installer (choose scsi0).</p>
-<p>Web UI: <b>https://VM-IP:8443</b></p>
+    success "Preflight checks passed."
+}
+
+# =============================================================================
+# Stage 1: ISO Check & Download
+# =============================================================================
+
+stage_iso() {
+    info "Stage 1: Checking for PDM ISO..."
+    local iso_path="${ISO_DIR}/${PDM_ISO_NAME}"
+
+    mkdir -p "${ISO_DIR}"
+
+    if [[ -f "${iso_path}" ]]; then
+        info "ISO found locally. Verifying checksum..."
+        local actual_sum
+        actual_sum=$(sha256sum "${iso_path}" | awk '{print $1}')
+        if [[ "${actual_sum}" == "${PDM_ISO_SHA256}" ]]; then
+            success "ISO checksum verified: ${iso_path}"
+            return 0
+        else
+            warn "Checksum mismatch! Re-downloading ISO..."
+            rm -f "${iso_path}"
+        fi
+    else
+        info "ISO not found locally. Downloading..."
+    fi
+
+    wget -O "${iso_path}" "${PDM_ISO_URL}" \
+        --progress=bar:force 2>&1 \
+        || error "Failed to download PDM ISO from ${PDM_ISO_URL}"
+
+    info "Verifying downloaded ISO checksum..."
+    local actual_sum
+    actual_sum=$(sha256sum "${iso_path}" | awk '{print $1}')
+    if [[ "${actual_sum}" != "${PDM_ISO_SHA256}" ]]; then
+        rm -f "${iso_path}"
+        error "Downloaded ISO checksum mismatch. File removed. Please retry."
+    fi
+
+    success "ISO downloaded and verified: ${iso_path}"
+}
+
+# =============================================================================
+# Stage 2: Build Unattended Answer File & Repack ISO
+# =============================================================================
+
+stage_answer_file() {
+    info "Stage 2: Building unattended answer file and repacking ISO..."
+
+    local original_iso="${ISO_DIR}/${PDM_ISO_NAME}"
+    local answer_iso="${ISO_DIR}/pdm-unattended.iso"
+    local work_dir
+    work_dir=$(mktemp -d /tmp/pdm-iso-XXXXXX)
+
+    # --- Write the answer file ---
+    # PDM uses the same answer file format as PVE/PBS
+    cat > "${work_dir}/answer.toml" <<EOF
+[global]
+keyboard = "${PDM_KEYBOARD}"
+country = "us"
+fqdn = "${PDM_HOSTNAME}.${PDM_DOMAIN}"
+mailto = "${PDM_EMAIL}"
+timezone = "${PDM_TIMEZONE}"
+root_password = "${PDM_PASSWORD}"
+
+[network]
+source = "from-dhcp"
+
+[disk-setup]
+filesystem = "${PDM_FILESYSTEM}"
+disk_list = ["${PDM_DISK}"]
 EOF
-)
-qm set $VMID -description "$DESCRIPTION" >/dev/null
 
-msg_ok "VM ${VMID} created successfully!"
+    info "Answer file written."
 
-if [[ "$START_VM" == "yes" ]]; then
-  msg_info "Starting VM (boots into installer)"
-  qm start $VMID
-  msg_ok "VM started → open console in Proxmox GUI"
-else
-  msg_ok "VM ready — start it manually"
-fi
+    # --- Extract ISO, inject answer file, repack ---
+    info "Extracting ISO (this may take a moment)..."
+    local extract_dir="${work_dir}/iso-extract"
+    mkdir -p "${extract_dir}"
 
-echo -e "\n${INFO}After the installer finishes the VM will reboot into PDM."
-echo -e "${INFO}Default web interface: ${GN}https://<VM-IP>:8443${CL}"
-post_update_to_api "done" "none"
+    xorriso -osirrox on \
+        -indev "${original_iso}" \
+        -extract / "${extract_dir}" \
+        &>/dev/null || error "Failed to extract ISO with xorriso."
+
+    # Copy answer file into the ISO root
+    cp "${work_dir}/answer.toml" "${extract_dir}/answer.toml"
+
+    # Add kernel boot parameter to trigger unattended mode
+    # PDM uses proxmox-auto-installer; we set the answer file location
+    local grub_cfg="${extract_dir}/boot/grub/grub.cfg"
+    if [[ -f "${grub_cfg}" ]]; then
+        # Inject proxmox-start-auto-installer into the first menuentry kernel line
+        sed -i 's/quiet$/quiet proxmox-start-auto-installer proxmox-installer-iso-answer=\/answer.toml/' \
+            "${grub_cfg}" || warn "Could not patch grub.cfg automatically — you may need to complete install manually."
+        info "Patched grub.cfg for unattended boot."
+    else
+        warn "grub.cfg not found at expected path. Unattended install may not trigger automatically."
+    fi
+
+    # Repack ISO
+    info "Repacking ISO with answer file (this may take a moment)..."
+    xorriso -as mkisofs \
+        -r -V "PDM_AUTO" \
+        -b isolinux/isolinux.bin \
+        -c isolinux/boot.cat \
+        -no-emul-boot -boot-load-size 4 -boot-info-table \
+        -eltorito-alt-boot \
+        -e boot/grub/efi.img \
+        -no-emul-boot \
+        -isohybrid-gpt-basdat \
+        -o "${answer_iso}" \
+        "${extract_dir}" \
+        &>/dev/null || {
+            warn "ISO repack failed — falling back to original ISO (manual install required)."
+            cp "${original_iso}" "${answer_iso}"
+        }
+
+    rm -rf "${work_dir}"
+    success "Unattended ISO ready: ${answer_iso}"
+}
+
+# =============================================================================
+# Stage 3: Create & Start the VM
+# =============================================================================
+
+stage_create_vm() {
+    info "Stage 3: Creating PDM VM (ID: ${VM_ID})..."
+
+    local answer_iso="${ISO_DIR}/pdm-unattended.iso"
+
+    qm create "${VM_ID}" \
+        --name "${VM_NAME}" \
+        --memory "${VM_RAM}" \
+        --cores "${VM_CORES}" \
+        --cpu host \
+        --machine q35 \
+        --bios ovmf \
+        --efidisk0 "${VM_DISK_STORAGE}:1,format=raw,efitype=4m,pre-enrolled-keys=0" \
+        --net0 "virtio,bridge=${VM_BRIDGE}" \
+        --ostype l26 \
+        --scsihw virtio-scsi-pci \
+        --scsi0 "${VM_DISK_STORAGE}:${VM_DISK_SIZE},format=raw" \
+        --cdrom "${VM_STORAGE}:iso/pdm-unattended.iso" \
+        --boot "order=scsi0;ide2" \
+        --agent enabled=1 \
+        --onboot 1 \
+        --tablet 0
+
+    success "VM ${VM_ID} created."
+
+    info "Starting VM ${VM_ID}..."
+    qm start "${VM_ID}"
+    success "VM started. PDM installer is running."
+    info "Boot order: installer will run from ISO, then reboot to disk."
+}
+
+# =============================================================================
+# Stage 4: Wait for PDM to Boot & Get IP
+# =============================================================================
+
+get_vm_ip() {
+    info "Stage 4: Waiting for PDM VM to boot and get an IP (DHCP)..."
+    info "This can take ${SSH_WAIT_SECONDS}s or more depending on install speed."
+
+    local elapsed=0
+    local vm_ip=""
+
+    while [[ $elapsed -lt $SSH_WAIT_SECONDS ]]; do
+        # Try qemu-guest-agent first (most reliable)
+        vm_ip=$(qm guest exec "${VM_ID}" -- hostname -I 2>/dev/null \
+            | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
+            | grep -v '^127\.' \
+            | head -1 || true)
+
+        if [[ -n "${vm_ip}" ]]; then
+            success "PDM VM IP: ${vm_ip}"
+            echo "${vm_ip}"
+            return 0
+        fi
+
+        info "Waiting for VM IP... (${elapsed}s elapsed)"
+        sleep "${SSH_RETRY_INTERVAL}"
+        elapsed=$((elapsed + SSH_RETRY_INTERVAL))
+    done
+
+    warn "Could not automatically detect VM IP after ${SSH_WAIT_SECONDS}s."
+    warn "Find the IP manually (check your DHCP server or PVE > VM > Summary)"
+    warn "Then run Stage 5 manually: install_netbird <IP>"
+    echo ""
+}
+
+# =============================================================================
+# Stage 5: Install Netbird on PDM via SSH
+# =============================================================================
+
+install_netbird() {
+    local pdm_ip="${1:-}"
+
+    if [[ -z "${pdm_ip}" ]]; then
+        error "No IP provided for Netbird installation. Run: $0 netbird <PDM_IP>"
+    fi
+
+    info "Stage 5: Installing Netbird on PDM at ${pdm_ip}..."
+
+    # Wait for SSH to be available
+    info "Waiting for SSH on ${pdm_ip}:22..."
+    local retries=0
+    while ! ssh -o ConnectTimeout=5 \
+                -o StrictHostKeyChecking=no \
+                -o BatchMode=yes \
+                "${PDM_SSH_USER}@${pdm_ip}" "exit" &>/dev/null; do
+        retries=$((retries + 1))
+        [[ $retries -gt 30 ]] && error "SSH not available after 5 minutes. Check PDM is fully booted."
+        sleep 10
+    done
+
+    success "SSH is available."
+
+    # Push and run the Netbird install script remotely
+    ssh -o StrictHostKeyChecking=no \
+        "${PDM_SSH_USER}@${pdm_ip}" \
+        bash -s -- \
+        "${NETBIRD_MANAGEMENT_URL}" \
+        "${NETBIRD_SETUP_KEY}" \
+        << 'REMOTE_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+MANAGEMENT_URL="$1"
+SETUP_KEY="$2"
+
+echo "[INFO] Updating packages..."
+apt-get update -qq
+
+echo "[INFO] Installing dependencies..."
+apt-get install -y -qq ca-certificates curl gnupg
+
+echo "[INFO] Adding Netbird apt repository..."
+curl -sSL https://pkgs.netbird.io/debian/public.key \
+    | gpg --dearmor --output /usr/share/keyrings/netbird-archive-keyring.gpg
+
+echo 'deb [signed-by=/usr/share/keyrings/netbird-archive-keyring.gpg] https://pkgs.netbird.io/debian stable main' \
+    | tee /etc/apt/sources.list.d/netbird.list
+
+apt-get update -qq
+apt-get install -y -qq netbird
+
+echo "[INFO] Connecting to self-hosted Netbird management server..."
+netbird up \
+    --management-url "${MANAGEMENT_URL}" \
+    --setup-key "${SETUP_KEY}" \
+    --daemon-addr unix:///var/run/netbird.sock
+
+echo "[INFO] Enabling Netbird service on boot..."
+systemctl enable netbird
+systemctl start netbird
+
+echo "[OK] Netbird installed and connected."
+echo ""
+echo "Netbird peer status:"
+netbird status
+REMOTE_SCRIPT
+
+    success "Netbird installed and connected on PDM."
+    echo ""
+    info "======================================================================"
+    info " PDM is ready at: https://${pdm_ip}:8443"
+    info " Netbird is connected to: ${NETBIRD_MANAGEMENT_URL}"
+    info ""
+    info " Next steps:"
+    info "   1. Log into PDM web UI with root / your configured password"
+    info "   2. On each remote PVE/PBS node, install Netbird and join the same"
+    info "      Netbird network using another setup key"
+    info "   3. In PDM, add remotes using their Netbird IP (100.x.x.x)"
+    info "   4. Create a dedicated API token on each remote PVE/PBS for PDM"
+    info "      (Datacenter > API Tokens, then add to PDM as a remote)"
+    info "======================================================================"
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+    echo ""
+    echo -e "${BLUE}=============================================${NC}"
+    echo -e "${BLUE}  PDM + Netbird Setup Script                ${NC}"
+    echo -e "${BLUE}  PVE Host Automation                       ${NC}"
+    echo -e "${BLUE}=============================================${NC}"
+    echo ""
+
+    case "${1:-full}" in
+        full)
+            preflight
+            stage_iso
+            stage_answer_file
+            stage_create_vm
+            local vm_ip
+            vm_ip=$(get_vm_ip)
+            if [[ -n "${vm_ip}" ]]; then
+                install_netbird "${vm_ip}"
+            fi
+            ;;
+        iso)
+            preflight
+            stage_iso
+            ;;
+        vm)
+            preflight
+            stage_create_vm
+            ;;
+        netbird)
+            # Run Netbird install stage only, with a provided IP
+            # Usage: ./setup-pdm-vm.sh netbird 192.168.1.50
+            install_netbird "${2:-}"
+            ;;
+        *)
+            echo "Usage: $0 [full|iso|vm|netbird <IP>]"
+            echo ""
+            echo "  full           Run all stages (default)"
+            echo "  iso            Only check/download the PDM ISO"
+            echo "  vm             Only create and start the VM"
+            echo "  netbird <IP>   Only install Netbird on a running PDM at <IP>"
+            exit 0
+            ;;
+    esac
+}
+
+main "$@"
