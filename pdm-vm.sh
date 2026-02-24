@@ -23,6 +23,8 @@ set -euo pipefail
 # !! CONFIGURE THESE BEFORE RUNNING !!
 # =============================================================================
 
+SCRIPT_VERSION="1.0.0"
+
 # --- VM Settings ---
 VM_ID=200                          # Change if 200 is already taken
 VM_NAME="pdm"
@@ -295,10 +297,12 @@ stage_create_vm() {
 # Stage 4: Wait for PDM to Boot & Get IP
 # =============================================================================
 
+# NOTE: This function prints status to stderr so it stays visible when called
+# inside $() command substitution. Only the final IP is echoed to stdout.
 get_vm_ip() {
-    info "Stage 4: Waiting for PDM VM to boot and obtain a DHCP IP..."
-    info "Polling every ${SSH_RETRY_INTERVAL}s — status updates will appear below."
-    echo ""
+    echo "[INFO]  Stage 4: Waiting for PDM VM to boot and obtain a DHCP IP..." >&2
+    echo "[INFO]  Polling every ${SSH_RETRY_INTERVAL}s — status updates will appear below." >&2
+    echo "" >&2
 
     local elapsed=0
     local vm_ip=""
@@ -315,13 +319,13 @@ get_vm_ip() {
             | head -1 || true)
 
         if [[ -n "${vm_ip}" ]]; then
-            echo ""
-            success "PDM VM IP detected: ${vm_ip}"
-            echo "${vm_ip}"
+            echo "" >&2
+            echo "[OK]    PDM VM IP detected: ${vm_ip}" >&2
+            echo "${vm_ip}"   # <-- only this goes to stdout / $()
             return 0
         fi
 
-        # Describe what's likely happening based on elapsed time
+        # Describe what is likely happening based on elapsed time
         local phase_msg=""
         if   [[ $elapsed -lt 60 ]];  then phase_msg="VM booting, loading installer..."
         elif [[ $elapsed -lt 180 ]]; then phase_msg="PDM installation in progress (partitioning/packages)..."
@@ -331,18 +335,18 @@ get_vm_ip() {
         fi
 
         printf "  [%3ds]  VM status: %-10s  %s\n" \
-            "${elapsed}" "${vm_status}" "${phase_msg}"
+            "${elapsed}" "${vm_status}" "${phase_msg}" >&2
 
         sleep "${SSH_RETRY_INTERVAL}"
         elapsed=$((elapsed + SSH_RETRY_INTERVAL))
     done
 
-    echo ""
-    warn "Could not automatically detect VM IP after ${SSH_WAIT_SECONDS}s."
-    warn "The install may still be running. Options:"
-    warn "  1. Check PVE web UI > VM ${VM_ID} > Console to see installer progress"
-    warn "  2. Check your DHCP server for a lease assigned to '${VM_NAME}'"
-    warn "  3. Once booted, run:  $0 netbird <PDM_IP>"
+    echo "" >&2
+    echo "[WARN]  Could not automatically detect VM IP after ${SSH_WAIT_SECONDS}s." >&2
+    echo "[WARN]  The install may still be running. Options:" >&2
+    echo "[WARN]    1. Check PVE web UI > VM ${VM_ID} > Console to see installer progress" >&2
+    echo "[WARN]    2. Check your DHCP server for a lease assigned to '${VM_NAME}'" >&2
+    echo "[WARN]    3. Once booted, run:  $0 netbird <PDM_IP>" >&2
     echo ""
 }
 
@@ -441,8 +445,8 @@ REMOTE_SCRIPT
 main() {
     echo ""
     echo -e "${BLUE}=============================================${NC}"
-    echo -e "${BLUE}  PDM + Netbird Setup Script                ${NC}"
-    echo -e "${BLUE}  PVE Host Automation                       ${NC}"
+    echo -e "${BLUE}  PDM + Netbird Setup Script  v${SCRIPT_VERSION}        ${NC}"
+    echo -e "${BLUE}  PVE Host Automation (requires PVE 9.1.6+) ${NC}"
     echo -e "${BLUE}=============================================${NC}"
     echo ""
 
