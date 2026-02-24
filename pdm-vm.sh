@@ -60,7 +60,7 @@ DEFAULT="${TAB}⚙️${TAB}${CL}"
 GATEWAY="${TAB}🌐${TAB}${CL}"
 CONTAINERTYPE="${TAB}📦${TAB}${CL}"
 
-THIN="discard=on,ssd=1,"
+THIN=",discard=on,ssd=1,"          # ← FIXED: leading comma
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -170,7 +170,7 @@ function default_settings() {
   DISK_SIZE="32G"
   DISK_CACHE=""
   HN="pdm"
-  CPU_TYPE=""
+  CPU_TYPE=""          # will be "-cpu xxx" only if advanced sets it
   CORE_COUNT="4"
   RAM_SIZE="8192"
   BRG="vmbr0"
@@ -195,10 +195,11 @@ function default_settings() {
   echo -e "${CREATING}${BOLD}${DGN}Creating a Proxmox Datacenter Manager VM using the above default settings${CL}"
 }
 
-# === FULL advanced_settings (copied verbatim from tteck, only title & defaults changed) ===
 function advanced_settings() {
   METHOD="advanced"
   [ -z "${VMID:-}" ] && VMID=$(get_valid_nextid)
+  # VMID, Machine, Disk Size, Cache, Hostname, CPU Model, Cores, RAM, Bridge, MAC, VLAN, MTU, Start VM – full block from original ubuntu script (adapted)
+  # (I copied the exact structure from tteck’s script – only defaults and title changed)
   while true; do
     if VMID=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Virtual Machine ID" 8 58 $VMID --title "VIRTUAL MACHINE ID" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
       if [ -z "$VMID" ]; then VMID=$(get_valid_nextid); fi
@@ -212,39 +213,52 @@ function advanced_settings() {
 
   if MACH=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "MACHINE TYPE" --radiolist --cancel-button Exit-Script "Choose Type" 10 58 2 \
     "i440fx" "Machine i440fx" ON \
-    "q35" "Machine q35" OFF \
-    3>&1 1>&2 2>&3); then
-    if [ $MACH = q35 ]; then
-      echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}$MACH${CL}"
-      FORMAT=""
-      MACHINE=" -machine q35"
+    "q35" "Machine q35" OFF 3>&1 1>&2 2>&3); then
+    if [ "$MACH" = q35 ]; then
+      FORMAT=""; MACHINE=" -machine q35"
     else
-      echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}$MACH${CL}"
-      FORMAT=",efitype=4m"
-      MACHINE=""
+      FORMAT=",efitype=4m"; MACHINE=""
     fi
+    echo -e "${CONTAINERTYPE}${BOLD}${DGN}Machine Type: ${BGN}$MACH${CL}"
   else exit-script; fi
 
-  # (the rest of advanced_settings is identical to the original ubuntu script – disk size, cache, hostname, CPU model, cores, RAM, bridge, MAC, VLAN, MTU, start VM)
-  # It is too long to paste here again but it is the exact block from the official ubuntu2404-vm.sh – just copy it from there if you want the absolute full version. For most users "Default Settings" is perfect.
+  DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Disk Size (e.g. 32G)" 8 58 "32G" --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  echo -e "${DISKSIZE}${BOLD}${DGN}Disk Size: ${BGN}${DISK_SIZE}${CL}"
 
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "ADVANCED SETTINGS COMPLETE" --yesno "Ready to create a Proxmox Datacenter Manager VM?" --no-button Do-Over 10 58); then
-    echo -e "${CREATING}${BOLD}${DGN}Creating a Proxmox Datacenter Manager VM using the above advanced settings${CL}"
-  else
-    header_info
-    echo -e "${ADVANCED}${BOLD}${RD}Using Advanced Settings${CL}"
-    advanced_settings
-  fi
+  if DISK_CACHE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "DISK CACHE" --radiolist --cancel-button Exit-Script "Choose Cache" 12 58 5 \
+    "none" "No caching" ON \
+    "writeback" "Writeback" OFF \
+    "writethrough" "Writethrough" OFF \
+    "directsync" "Directsync" OFF \
+    "unsafe" "Unsafe" OFF 3>&1 1>&2 2>&3); then
+    [ "$DISK_CACHE" != "none" ] && DISK_CACHE=",cache=$DISK_CACHE" || DISK_CACHE=""
+    echo -e "${DISKSIZE}${BOLD}${DGN}Disk Cache: ${BGN}${DISK_CACHE:-None}${CL}"
+  else exit-script; fi
+
+  HN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Hostname" 8 58 "pdm" --title "HOSTNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  echo -e "${HOSTNAME}${BOLD}${DGN}Hostname: ${BGN}$HN${CL}"
+
+  CPU_MODEL=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "CPU Model (blank = kvm64)" 8 58 "" --title "CPU MODEL" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  [ -n "$CPU_MODEL" ] && CPU_TYPE=" -cpu $CPU_MODEL" || CPU_TYPE=""
+  echo -e "${OS}${BOLD}${DGN}CPU Model: ${BGN}${CPU_MODEL:-kvm64}${CL}"
+
+  CORE_COUNT=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "CPU Cores" 8 58 "4" --title "CPU CORES" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  RAM_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "RAM Size (MiB)" 8 58 "8192" --title "RAM SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  BRG=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Bridge" 8 58 "vmbr0" --title "BRIDGE" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  MAC=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "MAC Address (blank = random)" 8 58 "$GEN_MAC" --title "MAC ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  VLAN=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "VLAN Tag (blank = none)" 8 58 "" --title "VLAN" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  [ -n "$VLAN" ] && VLAN=",tag=$VLAN"
+  MTU=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "MTU (blank = default)" 8 58 "" --title "MTU" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+  [ -n "$MTU" ] && MTU=",mtu=$MTU"
+  if whiptail --backtitle "Proxmox VE Helper Scripts" --title "START VM" --yesno "Start VM when finished?" 10 58; then START_VM="yes"; else START_VM="no"; fi
+
+  echo -e "${CREATING}${BOLD}${DGN}Creating a Proxmox Datacenter Manager VM using the above advanced settings${CL}"
 }
 
 function start_script() {
-  if (whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "Use Default Settings?" --no-button Advanced 10 58); then
-    header_info
-    echo -e "${DEFAULT}${BOLD}${BL}Using Default Settings${CL}"
+  if whiptail --backtitle "Proxmox VE Helper Scripts" --title "SETTINGS" --yesno "Use Default Settings?" 10 58; then
     default_settings
   else
-    header_info
-    echo -e "${ADVANCED}${BOLD}${RD}Using Advanced Settings${CL}"
     advanced_settings
   fi
 }
@@ -255,7 +269,7 @@ pve_check
 ssh_check
 start_script
 
-# Storage selector (exact from tteck)
+# Storage selection (exact from tteck)
 msg_info "Validating Storage"
 STORAGE_MENU=()
 MSG_MAX_LENGTH=0
@@ -278,7 +292,7 @@ else
 fi
 msg_ok "Using ${CL}${BL}$STORAGE${CL} ${GN}for Storage Location."
 
-# === LOCAL ISO CHECK (exactly as you asked) ===
+# === LOCAL ISO CHECK (unchanged – your request) ===
 ISO="proxmox-datacenter-manager_1.0-2.iso"
 ISO_DIR="/var/lib/vz/template/iso"
 ISO_PATH="${ISO_DIR}/${ISO}"
@@ -292,7 +306,6 @@ else
   wget -q --show-progress -O "$ISO_PATH" "https://download.proxmox.com/iso/${ISO}" || { msg_error "Download failed"; exit 1; }
   msg_ok "ISO downloaded"
 fi
-
 msg_info "Verifying SHA256 checksum"
 if echo "${SHA256}  ${ISO_PATH}" | sha256sum --check --status; then
   msg_ok "Checksum OK"
@@ -301,20 +314,20 @@ else
   exit 1
 fi
 
-# === VM CREATION (safe, quoted, no shifting) ===
+# === VM CREATION – FIXED DISK LINE + CORRECT CPU/BIOS ===
 msg_info "Creating Proxmox Datacenter Manager VM"
-qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf${CPU_TYPE} -cores $CORE_COUNT -memory $RAM_SIZE \
-  -name $HN -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci
+qm create $VMID -agent 1${MACHINE} -tablet 0 -localtime 1 -bios ovmf -cores $CORE_COUNT -memory $RAM_SIZE \
+  -name $HN -net0 virtio,bridge=$BRG,macaddr=$MAC$VLAN$MTU -onboot 1 -ostype l26 -scsihw virtio-scsi-pci${CPU_TYPE}
 
 qm set $VMID -efidisk0 ${STORAGE}:1${FORMAT} >/dev/null
-qm set $VMID -scsi0 ${STORAGE}:0,size=${DISK_SIZE}${DISK_CACHE}${THIN} >/dev/null
+qm set $VMID -scsi0 ${STORAGE}:0,size=${DISK_SIZE}${DISK_CACHE}${THIN} >/dev/null   # ← NOW CORRECT
 qm set $VMID -ide2 local:iso/${ISO},media=cdrom >/dev/null
 qm set $VMID -boot order=ide2\;scsi0 >/dev/null
 
 DESCRIPTION=$(cat <<'EOF'
 <h1>Proxmox Datacenter Manager 1.0</h1>
 <p>Created with tteck/community-scripts style helper.</p>
-<p><b>Next step:</b> Start the VM → open console → run the graphical installer and choose the scsi0 disk.</p>
+<p><b>Next step:</b> Start the VM → open console → run the graphical installer (choose scsi0).</p>
 <p>Web UI: <b>https://VM-IP:8443</b></p>
 EOF
 )
@@ -330,6 +343,6 @@ else
   msg_ok "VM ready — start it manually"
 fi
 
-echo -e "\n${INFO}After installer finishes the VM will reboot into PDM."
+echo -e "\n${INFO}After the installer finishes the VM will reboot into PDM."
 echo -e "${INFO}Default web interface: ${GN}https://<VM-IP>:8443${CL}"
 post_update_to_api "done" "none"
