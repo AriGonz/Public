@@ -2,7 +2,7 @@
 # =====================================================
 # Portable Proxmox Setup Script - 2026 Edition
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-portable-setup.sh)"
-# Version 0.60
+# Version 0.61
 # =====================================================
 
 # ╔══════════════════════════════════════════════════════════════╗
@@ -58,7 +58,7 @@ die()     { echo -e "${RED}✖ FATAL: $1${NC}"; exit 1; }
 # ── Version Banner ────────────────────────────────────────────
 clear
 echo -e "\n${BLUE}══════════════════════════════════════════════════════════════${NC}"
-echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.60${NC}"
+echo -e "${BLUE}   Portable Proxmox Setup Script  —  v0.61${NC}"
 echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}\n"
 
 # ── Pre-checks ────────────────────────────────────────────────
@@ -111,7 +111,7 @@ for (( i=0; i<${#MENU_ITEMS[@]}; i+=3 )); do
 done
 
 SELECTED=$(whiptail \
-    --title "Portable Proxmox Setup — v0.60" \
+    --title "Portable Proxmox Setup — v0.61" \
     --backtitle "Select tasks to run (SPACE to toggle, ENTER to confirm)" \
     --checklist "\nSelect which tasks to run.\nAll are pre-selected — uncheck anything you want to skip.\n\nSPACE = toggle   ENTER = confirm   TAB = switch buttons" \
     30 78 14 \
@@ -386,73 +386,106 @@ if [[ -n "${RUN[netbird]}" ]]; then
             curl -fsSL https://pkgs.netbird.io/install.sh | sh
         fi
 
-        echo -e "Connecting to Netbird management server..."
-        NETBIRD_LOG=$(mktemp /tmp/netbird-XXXXX.log)
-        netbird up --management-url "${NETBIRD_URL}" > "$NETBIRD_LOG" 2>&1 &
-
-        NETBIRD_AUTH_URL=""
-        for i in {1..10}; do
-            sleep 1
-            NETBIRD_AUTH_URL=$(grep -oE 'https://[^ ]+' "$NETBIRD_LOG" 2>/dev/null \
-                | grep -v 'pkgs\|install\|docs' | head -1 || true)
-            [[ -n "$NETBIRD_AUTH_URL" ]] && break
-        done
-        [[ -z "$NETBIRD_AUTH_URL" ]] && \
-            NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
-
-        USER_CODE=$(echo "$NETBIRD_AUTH_URL" | grep -oP 'user_code=\K[^&]+' || true)
-
+        # ── Ask if user has a setup key ──────────────────────────
         echo ""
-        echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${BYELLOW}${BOLD}   ★  Netbird Authorization Required  ★${NC}"
-        echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        if [[ -n "$NETBIRD_AUTH_URL" ]]; then
-            echo -e "${BWHITE}${BOLD}  Open this URL to authorize this device:${NC}"
-            echo -e "${BCYAN}${BOLD}  ${NETBIRD_AUTH_URL}${NC}"
-        else
-            echo -e "${BWHITE}${BOLD}  Run 'netbird status' to get your authorization URL${NC}"
-            echo -e "${BWHITE}${BOLD}  Management URL: ${BCYAN}${NETBIRD_URL}${NC}"
-        fi
-        if [[ -n "$USER_CODE" ]]; then
-            echo -e "${BWHITE}${BOLD}  Device flow URL:${NC}"
-            echo -e "${BCYAN}${BOLD}  https://netbird.arigonz.com/oauth2/device?user_code=${USER_CODE}${NC}"
-        fi
-        echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo ""
+        read -rp "$(echo -e "${BYELLOW}${BOLD}Do you have a Netbird setup key? (y/N): ${NC}")" HAS_SETUP_KEY
+        USER_CODE=""
 
-        echo -e "${BYELLOW}${BOLD}⏳ Waiting 10s for Netbird to initialize...${NC}"
-        sleep 10
-
-        check_netbird() {
-            local NETBIRD_FULL
-            NETBIRD_FULL=$(netbird status 2>/dev/null || true)
-            if echo "$NETBIRD_FULL" | grep -qi "connected"; then
-                NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-                [[ -z "$NETBIRD_IP" ]] && \
-                    NETBIRD_IP=$(ip addr show wt0 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
-                NETBIRD_CONNECTED=true
-                return 0
-            fi
-            return 1
-        }
-
-        echo -e "${BYELLOW}${BOLD}⏳ Waiting for Netbird authorization...${NC}"
-        for i in {1..10}; do
-            if check_netbird; then
-                echo ""
-                success "Netbird connected! IP: ${NETBIRD_IP}"
-                RECAP_NETBIRD="✔ Connected (${NETBIRD_IP})"
-                break
-            fi
-            sleep 1
-        done
-
-        if [[ "$NETBIRD_CONNECTED" == false ]]; then
+        if [[ "${HAS_SETUP_KEY,,}" =~ ^y$ ]]; then
+            # Setup key path — instant, no browser needed
             echo ""
-            echo -e "${BYELLOW}${BOLD}  Authorize at the URL above, then press ENTER to continue.${NC}"
-            echo -e "${BYELLOW}${BOLD}  (Press ENTER without authorizing to skip)${NC}"
-            read -rp "" _PAUSE
-            echo -e "${BYELLOW}${BOLD}⏳ Checking connection...${NC}"
+            read -rp "$(echo -e "${BWHITE}${BOLD}Paste your Netbird setup key: ${NC}")" NETBIRD_SETUP_KEY
+            if [[ -z "$NETBIRD_SETUP_KEY" ]]; then
+                warn "No setup key entered — falling back to OAuth flow"
+            else
+                echo -e "${BYELLOW}${BOLD}⏳ Connecting with setup key...${NC}"
+                netbird up --management-url "${NETBIRD_URL}" --setup-key "${NETBIRD_SETUP_KEY}" \
+                    > /tmp/netbird-setup.log 2>&1 &
+                sleep 5
+
+                check_netbird() {
+                    local NETBIRD_FULL
+                    NETBIRD_FULL=$(netbird status 2>/dev/null || true)
+                    if echo "$NETBIRD_FULL" | grep -qi "connected"; then
+                        NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+                        [[ -z "$NETBIRD_IP" ]] && \
+                            NETBIRD_IP=$(ip addr show wt0 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+                        NETBIRD_CONNECTED=true
+                        return 0
+                    fi
+                    return 1
+                }
+
+                for i in {1..12}; do
+                    if check_netbird; then
+                        echo ""
+                        success "Netbird connected via setup key! IP: ${NETBIRD_IP}"
+                        RECAP_NETBIRD="✔ Connected via setup key (${NETBIRD_IP})"
+                        break
+                    fi
+                    sleep 2
+                done
+                if [[ "$NETBIRD_CONNECTED" == false ]]; then
+                    warn "Setup key connection failed — check /tmp/netbird-setup.log"
+                    RECAP_NETBIRD="⚠ Setup key failed — not connected"
+                fi
+                echo ""
+            fi
+        fi
+
+        # OAuth flow (no setup key, or setup key was empty)
+        if [[ "$NETBIRD_CONNECTED" == false ]]; then
+            echo -e "Connecting to Netbird management server (OAuth flow)..."
+            NETBIRD_LOG=$(mktemp /tmp/netbird-XXXXX.log)
+            netbird up --management-url "${NETBIRD_URL}" > "$NETBIRD_LOG" 2>&1 &
+
+            NETBIRD_AUTH_URL=""
+            for i in {1..10}; do
+                sleep 1
+                NETBIRD_AUTH_URL=$(grep -oE 'https://[^ ]+' "$NETBIRD_LOG" 2>/dev/null \
+                    | grep -v 'pkgs\|install\|docs' | head -1 || true)
+                [[ -n "$NETBIRD_AUTH_URL" ]] && break
+            done
+            [[ -z "$NETBIRD_AUTH_URL" ]] && \
+                NETBIRD_AUTH_URL=$(netbird status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 || true)
+
+            USER_CODE=$(echo "$NETBIRD_AUTH_URL" | grep -oP 'user_code=\K[^&]+' || true)
+
+            echo ""
+            echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo -e "${BYELLOW}${BOLD}   ★  Netbird Authorization Required  ★${NC}"
+            echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            if [[ -n "$NETBIRD_AUTH_URL" ]]; then
+                echo -e "${BWHITE}${BOLD}  Open this URL to authorize this device:${NC}"
+                echo -e "${BCYAN}${BOLD}  ${NETBIRD_AUTH_URL}${NC}"
+            else
+                echo -e "${BWHITE}${BOLD}  Run 'netbird status' to get your authorization URL${NC}"
+                echo -e "${BWHITE}${BOLD}  Management URL: ${BCYAN}${NETBIRD_URL}${NC}"
+            fi
+            if [[ -n "$USER_CODE" ]]; then
+                echo -e "${BWHITE}${BOLD}  Device flow URL:${NC}"
+                echo -e "${BCYAN}${BOLD}  https://netbird.arigonz.com/oauth2/device?user_code=${USER_CODE}${NC}"
+            fi
+            echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+            echo ""
+
+            echo -e "${BYELLOW}${BOLD}⏳ Waiting 10s for Netbird to initialize...${NC}"
+            sleep 10
+
+            check_netbird() {
+                local NETBIRD_FULL
+                NETBIRD_FULL=$(netbird status 2>/dev/null || true)
+                if echo "$NETBIRD_FULL" | grep -qi "connected"; then
+                    NETBIRD_IP=$(echo "$NETBIRD_FULL" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+                    [[ -z "$NETBIRD_IP" ]] && \
+                        NETBIRD_IP=$(ip addr show wt0 2>/dev/null | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)
+                    NETBIRD_CONNECTED=true
+                    return 0
+                fi
+                return 1
+            }
+
+            echo -e "${BYELLOW}${BOLD}⏳ Waiting for Netbird authorization...${NC}"
             for i in {1..10}; do
                 if check_netbird; then
                     echo ""
@@ -462,12 +495,29 @@ if [[ -n "${RUN[netbird]}" ]]; then
                 fi
                 sleep 1
             done
+
             if [[ "$NETBIRD_CONNECTED" == false ]]; then
-                warn "Netbird not connected — skipping Netbird-dependent steps"
-                RECAP_NETBIRD="⚠ Not authorized — skipping"
+                echo ""
+                echo -e "${BYELLOW}${BOLD}  Authorize at the URL above, then press ENTER to continue.${NC}"
+                echo -e "${BYELLOW}${BOLD}  (Press ENTER without authorizing to skip)${NC}"
+                read -rp "" _PAUSE
+                echo -e "${BYELLOW}${BOLD}⏳ Checking connection...${NC}"
+                for i in {1..10}; do
+                    if check_netbird; then
+                        echo ""
+                        success "Netbird connected! IP: ${NETBIRD_IP}"
+                        RECAP_NETBIRD="✔ Connected (${NETBIRD_IP})"
+                        break
+                    fi
+                    sleep 1
+                done
+                if [[ "$NETBIRD_CONNECTED" == false ]]; then
+                    warn "Netbird not connected — skipping Netbird-dependent steps"
+                    RECAP_NETBIRD="⚠ Not authorized — skipping"
+                fi
             fi
+            echo ""
         fi
-        echo ""
     fi
 else
     warn "Skipping: Netbird"
@@ -477,11 +527,12 @@ fi
 # ─────────────────────────────────────────────────────────────
 # PHASE 4 — Cloudflared
 # ─────────────────────────────────────────────────────────────
+CLOUDFLARED_TOKEN_PENDING=false
 if [[ -n "${RUN[cloudflared]}" ]]; then
     step "PHASE 4 — Cloudflared Tunnel"
     if command -v cloudflared >/dev/null 2>&1; then
-        success "Cloudflared already installed — skipping"
-        RECAP_CLOUDFLARED="✔ Already installed (skipped)"
+        success "Cloudflared already installed"
+        RECAP_CLOUDFLARED="✔ Already installed"
     else
         mkdir -p --mode=0755 /usr/share/keyrings
         curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg \
@@ -489,8 +540,29 @@ if [[ -n "${RUN[cloudflared]}" ]]; then
         echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' \
             | tee /etc/apt/sources.list.d/cloudflared.list
         apt-get update -qq && apt-get install -y cloudflared
-        success "Cloudflared installed — run 'cloudflared service install <token>' to configure"
-        RECAP_CLOUDFLARED="✔ Installed (token not configured)"
+        success "Cloudflared installed"
+    fi
+    # Ask for token regardless of whether it was just installed or already present
+    echo ""
+    read -rp "$(echo -e "${BYELLOW}${BOLD}Do you have a Cloudflared tunnel token? (y/N): ${NC}")" HAS_CF_TOKEN
+    if [[ "${HAS_CF_TOKEN,,}" =~ ^y$ ]]; then
+        echo ""
+        read -rp "$(echo -e "${BWHITE}${BOLD}Paste your Cloudflared tunnel token: ${NC}")" CF_TOKEN
+        if [[ -z "$CF_TOKEN" ]]; then
+            warn "No token entered — skipping service install"
+            CLOUDFLARED_TOKEN_PENDING=true
+            RECAP_CLOUDFLARED="⚠ Installed (token not configured)"
+        else
+            echo -e "${BYELLOW}${BOLD}⏳ Installing Cloudflared service with token...${NC}"
+            cloudflared service install "${CF_TOKEN}" \
+                && success "Cloudflared service installed and running" \
+                && RECAP_CLOUDFLARED="✔ Installed + service running" \
+                || { warn "Service install failed — check token"; CLOUDFLARED_TOKEN_PENDING=true; RECAP_CLOUDFLARED="⚠ Installed (service install failed)"; }
+        fi
+    else
+        warn "No token provided — you can configure later"
+        CLOUDFLARED_TOKEN_PENDING=true
+        RECAP_CLOUDFLARED="⚠ Installed (token not configured)"
     fi
 else
     warn "Skipping: Cloudflared"
@@ -999,13 +1071,6 @@ fi
 # ─────────────────────────────────────────────────────────────
 step "PHASE 8 — Complete"
 
-if [[ -n "${USER_CODE:-}" ]]; then
-    echo -e ""
-    echo -e "${BYELLOW}${BOLD}  Netbird Device Flow URL (if still needed):${NC}"
-    echo -e "${BCYAN}${BOLD}  https://netbird.arigonz.com/oauth2/device?user_code=${USER_CODE}${NC}"
-    echo -e ""
-fi
-
 echo -e ""
 echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║                     SETUP RECAP                              ║${NC}"
@@ -1028,6 +1093,28 @@ echo -e ""
 if [[ "$NETBIRD_CONNECTED" == false && -n "${RUN[firewall]}" ]]; then
     echo -e "${YELLOW}⚠ Remember: Firewall was NOT enabled because Netbird did not connect.${NC}"
     echo -e "${YELLOW}  Secure your node manually before exposing it to the internet.${NC}"
+    echo -e ""
+fi
+
+if [[ -n "${USER_CODE:-}" ]]; then
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BYELLOW}${BOLD}   ★  Netbird still needs authorization  ★${NC}"
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BWHITE}${BOLD}  Complete device authorization at:${NC}"
+    echo -e "${BCYAN}${BOLD}  https://netbird.arigonz.com/oauth2/device?user_code=${USER_CODE}${NC}"
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e ""
+fi
+
+if [[ "$CLOUDFLARED_TOKEN_PENDING" == true ]]; then
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BYELLOW}${BOLD}   ★  Cloudflared tunnel not yet configured  ★${NC}"
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BWHITE}${BOLD}  Run the following to configure the tunnel service:${NC}"
+    echo -e "${BCYAN}${BOLD}  cloudflared service install <your-token>${NC}"
+    echo -e "${BWHITE}${BOLD}  Or run the tunnel manually:${NC}"
+    echo -e "${BCYAN}${BOLD}  cloudflared tunnel run --token <your-token>${NC}"
+    echo -e "${BYELLOW}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e ""
 fi
 
