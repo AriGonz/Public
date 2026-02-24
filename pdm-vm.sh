@@ -6,6 +6,11 @@
 # https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pdm-vm.sh)"
 
+# === VISUAL VERSION .01 + SLEEP 2s (as requested) ===
+echo -e "\n${BOLD}${GN}══════════════════════════════════════${CL}"
+echo -e "${TAB}${BOLD}${BL}          Script Version${CL} ${GN}.01${CL}"
+echo -e "${BOLD}${GN}══════════════════════════════════════${CL}\n"
+sleep 2
 
 source /dev/stdin <<<$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/api.func)
 
