@@ -28,7 +28,7 @@ set -euo pipefail
 # !! CONFIGURE THESE BEFORE RUNNING !!
 # =============================================================================
 
-SCRIPT_VERSION="0.1"
+SCRIPT_VERSION="0.2"
 
 # --- VM Settings ---
 VM_ID=200                          # Change if 200 is already taken
@@ -301,6 +301,15 @@ EOF
 stage_create_vm() {
     info "Stage 3: Creating PDM VM (ID: ${VM_ID})..."
 
+    # Clean up any previous failed attempt with this VM ID
+    if qm status "${VM_ID}" &>/dev/null; then
+        warn "VM ${VM_ID} already exists — stopping and removing it before recreating..."
+        qm stop "${VM_ID}" &>/dev/null || true
+        sleep 3
+        qm destroy "${VM_ID}" --destroy-unreferenced-disks 1 --purge 1
+        success "Old VM ${VM_ID} removed."
+    fi
+
     local answer_iso="${ISO_DIR}/pdm-unattended.iso"
 
     qm create "${VM_ID}" \
@@ -309,14 +318,13 @@ stage_create_vm() {
         --cores "${VM_CORES}" \
         --cpu host \
         --machine q35 \
-        --bios ovmf \
-        --efidisk0 "${VM_DISK_STORAGE}:1,format=raw,efitype=4m,pre-enrolled-keys=0" \
+        --bios seabios \
         --net0 "virtio,bridge=${VM_BRIDGE}" \
         --ostype l26 \
         --scsihw virtio-scsi-pci \
         --scsi0 "${VM_DISK_STORAGE}:${VM_DISK_SIZE},format=raw" \
-        --cdrom "${VM_STORAGE}:iso/pdm-unattended.iso" \
-        --boot "order=scsi0;ide2" \
+        --ide2 "${VM_STORAGE}:iso/pdm-unattended.iso,media=cdrom" \
+        --boot "order=ide2;scsi0" \
         --agent enabled=1 \
         --onboot 1 \
         --tablet 0
