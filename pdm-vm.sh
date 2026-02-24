@@ -51,7 +51,7 @@ PDM_FILESYSTEM="ext4"              # ext4 or zfs
 
 # --- Netbird Settings ---
 NETBIRD_MANAGEMENT_URL="https://your-netbird-server.example.com:33073"
-NETBIRD_SETUP_KEY="YOUR-SETUP-KEY-HERE"
+NETBIRD_SETUP_KEY=""   # Leave blank — script will prompt you securely at runtime
 
 # --- SSH Settings (used after PDM boots to install Netbird) ---
 # Since we're using DHCP we wait for the VM to appear and grab its IP.
@@ -74,6 +74,44 @@ info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
 success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+
+# =============================================================================
+# Prompt for Netbird Setup Key
+# =============================================================================
+
+prompt_netbird_key() {
+    if [[ -n "${NETBIRD_SETUP_KEY}" ]]; then
+        info "Netbird setup key already set in script variables."
+        return 0
+    fi
+
+    echo ""
+    echo -e "${BLUE}=============================================${NC}"
+    echo -e "${BLUE}  Netbird Setup Key Required                ${NC}"
+    echo -e "${BLUE}=============================================${NC}"
+    echo ""
+    echo "  Find your setup key in your Netbird dashboard:"
+    echo "  Setup Keys → Create Key (or copy an existing reusable one)"
+    echo ""
+
+    local key=""
+    while [[ -z "${key}" ]]; do
+        read -rsp "  Enter Netbird setup key (input hidden): " key
+        echo ""
+        if [[ -z "${key}" ]]; then
+            warn "Setup key cannot be empty. Please try again."
+        fi
+    done
+
+    # Basic format sanity check (Netbird keys are UUID-like)
+    if [[ ! "${key}" =~ ^[A-Za-z0-9]{8}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{12}$ ]]; then
+        warn "Key format looks unusual (expected UUID format). Continuing anyway..."
+    fi
+
+    NETBIRD_SETUP_KEY="${key}"
+    success "Netbird setup key accepted."
+    echo ""
+}
 
 # =============================================================================
 # Preflight Checks
@@ -258,33 +296,53 @@ stage_create_vm() {
 # =============================================================================
 
 get_vm_ip() {
-    info "Stage 4: Waiting for PDM VM to boot and get an IP (DHCP)..."
-    info "This can take ${SSH_WAIT_SECONDS}s or more depending on install speed."
+    info "Stage 4: Waiting for PDM VM to boot and obtain a DHCP IP..."
+    info "Polling every ${SSH_RETRY_INTERVAL}s — status updates will appear below."
+    echo ""
 
     local elapsed=0
     local vm_ip=""
+    local vm_status=""
 
     while [[ $elapsed -lt $SSH_WAIT_SECONDS ]]; do
-        # Try qemu-guest-agent first (most reliable)
+        # Get current VM power status
+        vm_status=$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}' || echo "unknown")
+
+        # Try to get IP via qemu-guest-agent (only works once agent is running post-install)
         vm_ip=$(qm guest exec "${VM_ID}" -- hostname -I 2>/dev/null \
             | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
             | grep -v '^127\.' \
             | head -1 || true)
 
         if [[ -n "${vm_ip}" ]]; then
-            success "PDM VM IP: ${vm_ip}"
+            echo ""
+            success "PDM VM IP detected: ${vm_ip}"
             echo "${vm_ip}"
             return 0
         fi
 
-        info "Waiting for VM IP... (${elapsed}s elapsed)"
+        # Describe what's likely happening based on elapsed time
+        local phase_msg=""
+        if   [[ $elapsed -lt 60 ]];  then phase_msg="VM booting, loading installer..."
+        elif [[ $elapsed -lt 180 ]]; then phase_msg="PDM installation in progress (partitioning/packages)..."
+        elif [[ $elapsed -lt 300 ]]; then phase_msg="Finalising install, first reboot imminent..."
+        elif [[ $elapsed -lt 420 ]]; then phase_msg="PDM first boot — services starting up..."
+        else                               phase_msg="Still waiting — install may be slow or check console."
+        fi
+
+        printf "  [%3ds]  VM status: %-10s  %s\n" \
+            "${elapsed}" "${vm_status}" "${phase_msg}"
+
         sleep "${SSH_RETRY_INTERVAL}"
         elapsed=$((elapsed + SSH_RETRY_INTERVAL))
     done
 
+    echo ""
     warn "Could not automatically detect VM IP after ${SSH_WAIT_SECONDS}s."
-    warn "Find the IP manually (check your DHCP server or PVE > VM > Summary)"
-    warn "Then run Stage 5 manually: install_netbird <IP>"
+    warn "The install may still be running. Options:"
+    warn "  1. Check PVE web UI > VM ${VM_ID} > Console to see installer progress"
+    warn "  2. Check your DHCP server for a lease assigned to '${VM_NAME}'"
+    warn "  3. Once booted, run:  $0 netbird <PDM_IP>"
     echo ""
 }
 
@@ -391,6 +449,7 @@ main() {
     case "${1:-full}" in
         full)
             preflight
+            prompt_netbird_key
             stage_iso
             stage_answer_file
             stage_create_vm
@@ -411,6 +470,7 @@ main() {
         netbird)
             # Run Netbird install stage only, with a provided IP
             # Usage: ./setup-pdm-vm.sh netbird 192.168.1.50
+            prompt_netbird_key
             install_netbird "${2:-}"
             ;;
         *)
