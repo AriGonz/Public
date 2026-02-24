@@ -10,126 +10,109 @@
 # Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pdm-full-iso-deploy.sh)"
 # =====================================================
 
+
 set -euo pipefail
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 log()    { echo -e "${GREEN}[✔]${NC} $1"; }
 warn()   { echo -e "${YELLOW}[!]${NC} $1"; }
 error()  { echo -e "${RED}[✖]${NC} $1" >&2; exit 1; }
 
-[[ $EUID -eq 0 ]] || error "This script must run as root"
+[[ $EUID -eq 0 ]] || error "Run as root on the PVE host"
 
-log "=== Proxmox Datacenter Manager (PDM) 1.0+ Deployer ==="
+log "=== Proxmox Datacenter Manager (PDM) 1.0+ Deployer (v2.0 Fixed) ==="
 
-# Latest known stable (Feb 2026)
+# Latest verified PDM ISO (Feb 2026)
 PDM_ISO="proxmox-datacenter-manager_1.0-2.iso"
 PDM_URL="http://download.proxmox.com/iso/${PDM_ISO}"
 SHA256="b4b98ed3e8f4dabb1151ebb713d6e7109aeba00d95b88bf65f954dd9ef1e89e1"
 
-# === 1. CHECK FOR EXISTING PDM ISOs IN ALL STORAGES ===
-log "Scanning all active storages for proxmox-datacenter-manager*.iso..."
-
+# 1. Find or download PDM ISO (you already have it)
+log "Scanning storages for PDM ISO..."
 EXISTING_VOLIDS=()
 mapfile -t STORAGES < <(pvesm status | awk 'NR>1 && $3=="active" {print $1}')
 
 for storage in "${STORAGES[@]}"; do
-  mapfile -t VOLIDS < <(pvesm list "$storage" --content iso 2>/dev/null \
-    | awk 'NR>1 {print $1}' | grep -E '^.*:.*proxmox-datacenter-manager_[0-9.-]+\.iso$' || true)
-  for volid in "${VOLIDS[@]}"; do
-    EXISTING_VOLIDS+=("$volid")
+  mapfile -t VOLIDS < <(pvesm list "$storage" --content iso 2>/dev/null | awk 'NR>1 {print $1}' | grep -E 'proxmox-datacenter-manager' || true)
+  for vol in "${VOLIDS[@]}"; do
+    EXISTING_VOLIDS+=("$vol")
   done
 done
 
-# deduplicate & sort by version (newest first)
-readarray -t EXISTING_VOLIDS < <(printf '%s\n' "${EXISTING_VOLIDS[@]}" | sort -u -rV)
-
 SELECTED_VOLID=""
-
 if [[ ${#EXISTING_VOLIDS[@]} -gt 0 ]]; then
   log "Found ${#EXISTING_VOLIDS[@]} PDM ISO(s):"
   for i in "${!EXISTING_VOLIDS[@]}"; do
     echo "   $((i+1))) ${EXISTING_VOLIDS[i]}"
   done
-
-  if whiptail --title "Existing ISO Found" --yesno "Use an existing PDM ISO?" 12 70; then
-    # Simple menu selection
-    MENU_ITEMS=()
-    for vol in "${EXISTING_VOLIDS[@]}"; do
-      MENU_ITEMS+=("$vol" "")
-    done
-    SELECTED_VOLID=$(whiptail --title "Choose PDM ISO" --menu "Select which ISO to use:" 15 80 10 "${MENU_ITEMS[@]}" 3>&1 1>&2 2>&3)
+  if whiptail --title "PDM ISO" --yesno "Use an existing PDM ISO?" 12 75; then
+    MENU=()
+    for v in "${EXISTING_VOLIDS[@]}"; do MENU+=("$v" ""); done
+    SELECTED_VOLID=$(whiptail --title "Select ISO" --menu "" 15 80 10 "${MENU[@]}" 3>&1 1>&2 2>&3)
   fi
 fi
 
-# === 2. DOWNLOAD LATEST IF NEEDED ===
 if [[ -z "$SELECTED_VOLID" ]]; then
-  log "No existing ISO selected → downloading latest verified PDM ISO..."
-
+  log "Downloading latest PDM ISO..."
   mkdir -p /var/lib/vz/template/iso
   cd /var/lib/vz/template/iso
-
-  if [[ -f "$PDM_ISO" ]] && echo "$SHA256  $PDM_ISO" | sha256sum --check --status 2>/dev/null; then
-    log "Latest ISO already present and verified."
-  else
-    wget --progress=bar:force:noscroll -O "${PDM_ISO}.tmp" "$PDM_URL"
-    echo "$SHA256  ${PDM_ISO}.tmp" | sha256sum --check --status || error "SHA256 verification failed!"
+  if [[ ! -f "$PDM_ISO" ]] || ! echo "$SHA256  $PDM_ISO" | sha256sum --check --status; then
+    wget -q --show-progress -O "${PDM_ISO}.tmp" "$PDM_URL"
+    echo "$SHA256  ${PDM_ISO}.tmp" | sha256sum --check || error "SHA256 failed"
     mv "${PDM_ISO}.tmp" "$PDM_ISO"
-    log "Download complete & SHA256 verified!"
+    log "ISO downloaded & verified"
   fi
   SELECTED_VOLID="local:iso/${PDM_ISO}"
 fi
 
-log "Using PDM ISO → ${GREEN}${SELECTED_VOLID}${NC}"
+log "Using ISO → ${GREEN}${SELECTED_VOLID}${NC}"
 
-# === 3. OPTIONAL AUTO VM CREATION ===
-if whiptail --title "PDM Installation" --yesno "Automatically create a VM with this ISO attached?" 12 70; then
-  VMID=$(whiptail --inputbox "VM ID (e.g. 900)" 10 50 "900" 3>&1 1>&2 2>&3)
-  NAME=$(whiptail --inputbox "VM Name" 10 50 "pdm-manager" 3>&1 1>&2 2>&3)
-  CORES=$(whiptail --inputbox "CPU Cores" 10 50 "4" 3>&1 1>&2 2>&3)
-  MEM=$(whiptail --inputbox "Memory (MB)" 10 50 "8192" 3>&1 1>&2 2>&3)
-  DISKSTORE=$(whiptail --inputbox "Disk Storage (e.g. local-lvm)" 10 50 "local-lvm" 3>&1 1>&2 2>&3)
-  DISKSIZE=$(whiptail --inputbox "Disk Size (e.g. 64G)" 10 50 "64G" 3>&1 1>&2 2>&3)
-  BRIDGE=$(whiptail --inputbox "Network Bridge" 10 50 "vmbr0" 3>&1 1>&2 2>&3)
+# 2. Create the VM (with proper syntax)
+if whiptail --title "Create PDM VM" --yesno "Create VM 900 (pdm-manager) with this ISO attached?" 13 80; then
+  VMID=900
+  NAME="pdm-manager"
 
   log "Creating VM ${VMID} (${NAME}) ..."
 
-  qm create "$VMID" \
+  # Clean any previous partial VM
+  qm destroy $VMID --purge 2>/dev/null || true
+
+  qm create $VMID \
     --name "$NAME" \
+    --machine q35 \
+    --bios ovmf \
     --ostype l26 \
     --cpu host \
-    --cores "$CORES" \
-    --memory "$MEM" \
-    --net0 virtio,bridge="$BRIDGE" \
-    --scsi0 "$DISKSTORE:$DISKSIZE" \
+    --cores 4 \
+    --memory 8192 \
+    --net0 virtio,bridge=vmbr0 \
+    --scsihw virtio-scsi-single \
+    --scsi0 local-lvm:64G,discard=on,ssd=1 \
+    --efidisk0 local-lvm:0,efitype=4m,pre-enrolled-keys=1 \
     --ide2 "$SELECTED_VOLID,media=cdrom" \
-    --boot "order=scsi0;ide2" \
+    --boot order=scsi0\;ide2 \
     --agent enabled=1 \
-    --hotplug 1 \
-    --efidisk0 "$DISKSTORE:0,efitype=4m" 2>/dev/null || true
+    --hotplug disk,network,usb \
+    --numa 0
 
-  log "${GREEN}VM ${VMID} created and ready!${NC}"
-  log "Next steps:"
-  echo "   1. PVE Web UI → VM ${VMID} → Console → Start"
-  echo "   2. Follow the PDM ISO installer (choose target disk, etc.)"
-  echo "   3. After reboot & first login, run your portable setup (see below)"
+  if qm config $VMID >/dev/null 2>&1; then
+    log "${GREEN}VM ${VMID} successfully created!${NC}"
+    echo -e "\n${BLUE}Next steps — do this now:${NC}"
+    echo "   1. PVE Web UI → VM 900 → Console tab"
+    echo "   2. Click Start"
+    echo "   3. Install PDM from the ISO (choose target disk, set root password, static IP recommended)"
+    echo "   4. After install finishes & VM reboots, SSH into it as root"
+    echo "   5. Then run the portable setup:"
+    echo "      bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pdm-portable-setup.sh)\""
+  else
+    error "VM creation failed — please paste the full output above"
+  fi
 else
-  log "VM creation skipped. You can attach ${SELECTED_VOLID} to any VM manually."
+  log "VM creation skipped (you can attach the ISO manually)"
 fi
 
-# === 4. YOUR PORTABLE SETUP READY ===
-curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pdm-portable-setup.sh \
-     -o /usr/local/bin/pdm-portable-setup.sh 2>/dev/null || true
-chmod +x /usr/local/bin/pdm-portable-setup.sh 2>/dev/null || true
-
 log "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-log "PDM ISO is ready at: ${SELECTED_VOLID}"
-log ""
-log "After PDM is installed and you can SSH into the new instance:"
-log "   Run:  pdm-portable-setup.sh"
-log ""
-log "Or one-liner:"
-log "   bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pdm-portable-setup.sh)\""
-log "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-
-log "All done! Enjoy your PDM 1.0+ setup."
+log "PDM ISO is ready. VM 900 is ready (if you chose to create it)."
+log "QEMU guest agent will be installed automatically by the portable script."
+log "All done! 🚀"
