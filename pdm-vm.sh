@@ -18,7 +18,7 @@
 #
 # Requirements:
 #   - Run as root on the PVE host
-#   - xorriso installed (for ISO repack): apt install xorriso wget
+#   - proxmox-auto-install-assistant (auto-installed if missing, ships with PVE 9.x)
 #   - Your self-hosted Netbird management URL and setup key
 # =============================================================================
 
@@ -28,7 +28,7 @@ set -euo pipefail
 # !! CONFIGURE THESE BEFORE RUNNING !!
 # =============================================================================
 
-SCRIPT_VERSION="0.2"
+SCRIPT_VERSION="0.3"
 
 # --- VM Settings ---
 VM_ID=200                          # Change if 200 is already taken
@@ -132,7 +132,7 @@ preflight() {
 
     command -v qm       &>/dev/null || error "'qm' not found. Are you running this on a PVE host?"
     command -v wget     &>/dev/null || error "'wget' not found. Install with: apt install wget"
-    command -v xorriso  &>/dev/null || error "'xorriso' not found. Install with: apt install xorriso"
+    # proxmox-auto-install-assistant is auto-installed if missing
     command -v sha256sum &>/dev/null || error "'sha256sum' not found."
     command -v ssh      &>/dev/null || error "'ssh' not found."
 
@@ -196,9 +196,15 @@ stage_answer_file() {
     local work_dir
     work_dir=$(mktemp -d /tmp/pdm-iso-XXXXXX)
 
+    # --- Check for proxmox-auto-install-assistant (ships with PVE 9.x) ---
+    if ! command -v proxmox-auto-install-assistant &>/dev/null; then
+        warn "proxmox-auto-install-assistant not found. Installing..."
+        apt-get install -y -qq proxmox-auto-install-assistant \
+            || error "Failed to install proxmox-auto-install-assistant."
+    fi
+
     # --- Write the answer file ---
-    # PDM uses the same answer file format as PVE/PBS
-    cat > "${work_dir}/answer.toml" <<EOF
+    cat > "${work_dir}/answer.toml" <<ANSWEREOF
 [global]
 keyboard = "${PDM_KEYBOARD}"
 country = "us"
@@ -213,82 +219,20 @@ source = "from-dhcp"
 [disk-setup]
 filesystem = "${PDM_FILESYSTEM}"
 disk_list = ["${PDM_DISK}"]
-EOF
+ANSWEREOF
 
     info "Answer file written."
 
-    # --- Extract ISO, inject answer file, repack ---
-    info "Extracting ISO (this may take a moment)..."
-    local extract_dir="${work_dir}/iso-extract"
-    mkdir -p "${extract_dir}"
+    # --- Use the official Proxmox tool to prepare the ISO ---
+    # This correctly handles grub patching, kernel parameters, and ISO repacking
+    info "Repacking ISO with proxmox-auto-install-assistant (this may take a moment)..."
 
-    xorriso -osirrox on \
-        -indev "${original_iso}" \
-        -extract / "${extract_dir}" \
-        &>/dev/null || error "Failed to extract ISO with xorriso."
-
-    # Copy answer file into the ISO root
-    cp "${work_dir}/answer.toml" "${extract_dir}/answer.toml"
-
-    # Add kernel boot parameter to trigger unattended mode
-    # PDM uses proxmox-auto-installer; we set the answer file location
-    local grub_cfg="${extract_dir}/boot/grub/grub.cfg"
-    if [[ -f "${grub_cfg}" ]]; then
-        # Inject proxmox-start-auto-installer into the first menuentry kernel line
-        sed -i 's/quiet$/quiet proxmox-start-auto-installer proxmox-installer-iso-answer=\/answer.toml/' \
-            "${grub_cfg}" || warn "Could not patch grub.cfg automatically — you may need to complete install manually."
-        info "Patched grub.cfg for unattended boot."
-    else
-        warn "grub.cfg not found at expected path. Unattended install may not trigger automatically."
-    fi
-
-    # Repack ISO
-    # Detect which boot catalog path exists in the extracted ISO
-    info "Repacking ISO with answer file (this may take a moment)..."
-    local boot_catalog=""
-    local boot_image=""
-    local repack_log="${work_dir}/xorriso.log"
-
-    if [[ -f "${extract_dir}/isolinux/isolinux.bin" ]]; then
-        boot_catalog="isolinux/boot.cat"
-        boot_image="isolinux/isolinux.bin"
-    elif [[ -f "${extract_dir}/boot/grub/i386-pc/eltorito.img" ]]; then
-        boot_catalog="boot/grub/i386-pc/boot.cat"
-        boot_image="boot/grub/i386-pc/eltorito.img"
-    fi
-
-    local xorriso_args=( -as mkisofs -r -V "PDM_AUTO" )
-
-    if [[ -n "${boot_image}" ]]; then
-        xorriso_args+=(
-            -b "${boot_image}"
-            -c "${boot_catalog}"
-            -no-emul-boot -boot-load-size 4 -boot-info-table
-        )
-    fi
-
-    # Always include EFI boot if present
-    if [[ -f "${extract_dir}/boot/grub/efi.img" ]]; then
-        xorriso_args+=(
-            -eltorito-alt-boot
-            -e boot/grub/efi.img
-            -no-emul-boot
-            -isohybrid-gpt-basdat
-        )
-    fi
-
-    xorriso_args+=( -o "${answer_iso}" "${extract_dir}" )
-
-    if xorriso "${xorriso_args[@]}" >"${repack_log}" 2>&1; then
-        success "ISO repacked successfully with answer file."
-    else
-        warn "ISO repack failed. xorriso output:"
-        tail -5 "${repack_log}" | while IFS= read -r line; do
-            warn "  ${line}"
-        done
-        warn "Falling back to original ISO — manual install will be required."
-        cp "${original_iso}" "${answer_iso}"
-    fi
+    proxmox-auto-install-assistant prepare-iso "${original_iso}" \
+        --fetch-from iso \
+        --answer-file "${work_dir}/answer.toml" \
+        --output "${answer_iso}" \
+        && success "ISO repacked successfully with answer file." \
+        || error "proxmox-auto-install-assistant failed to prepare the ISO."
 
     rm -rf "${work_dir}"
     success "Unattended ISO ready: ${answer_iso}"
