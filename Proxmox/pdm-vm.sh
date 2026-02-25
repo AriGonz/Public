@@ -28,7 +28,7 @@ set -euo pipefail
 # !! CONFIGURE THESE BEFORE RUNNING !!
 # =============================================================================
 
-SCRIPT_VERSION="0.5"
+SCRIPT_VERSION="0.6"
 
 # --- VM Settings ---
 VM_ID=200                          # Change if 200 is already taken
@@ -304,17 +304,45 @@ stage_create_vm() {
 # NOTE: This function prints status to stderr so it stays visible when called
 # inside $() command substitution. Only the final IP is echoed to stdout.
 get_vm_ip() {
-    echo "[INFO]  Stage 4: Waiting for PDM VM to boot and obtain a DHCP IP..." >&2
+    echo "[INFO]  Stage 4: Waiting for PDM to install, reboot, and obtain a DHCP IP..." >&2
     echo "[INFO]  Polling every ${SSH_RETRY_INTERVAL}s — status updates will appear below." >&2
     echo "" >&2
 
     local elapsed=0
     local vm_ip=""
     local vm_status=""
+    local cdrom_ejected=0
+    local reboot_detected=0
+    local was_running=0
 
     while [[ $elapsed -lt $SSH_WAIT_SECONDS ]]; do
         # Get current VM power status
         vm_status=$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}' || echo "unknown")
+
+        # Detect install-complete reboot: VM transitions running → stopped → running.
+        # We eject the CD-ROM the moment the VM stops (end of installer), so when it
+        # comes back up it boots from disk (the installed OS) instead of the ISO again.
+        if [[ "${vm_status}" == "running" ]]; then
+            was_running=1
+        elif [[ "${vm_status}" == "stopped" && $was_running -eq 1 && $cdrom_ejected -eq 0 ]]; then
+            echo "" >&2
+            echo "[INFO]  Installer finished — VM stopped for first reboot." >&2
+            echo "[INFO]  Ejecting CD-ROM (ide2) so next boot uses the disk..." >&2
+            if qm set "${VM_ID}" --ide2 none,media=cdrom 2>/dev/null; then
+                echo "[OK]    CD-ROM ejected. VM will boot from disk on next start." >&2
+            else
+                echo "[WARN]  Could not eject CD-ROM automatically. Remove it in the PVE UI before the VM restarts." >&2
+            fi
+            cdrom_ejected=1
+            reboot_detected=1
+            # PVE with --onboot 1 should restart the VM automatically; if not, start it
+            sleep 3
+            if [[ "$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}')" != "running" ]]; then
+                echo "[INFO]  Starting VM for first boot of installed PDM..." >&2
+                qm start "${VM_ID}" 2>/dev/null || true
+            fi
+            was_running=0
+        fi
 
         # Try to get IP via qemu-guest-agent (only works once agent is running post-install)
         vm_ip=$(qm guest exec "${VM_ID}" -- hostname -I 2>/dev/null \
@@ -325,9 +353,13 @@ get_vm_ip() {
         if [[ -n "${vm_ip}" ]]; then
             echo "" >&2
             echo "[OK]    PDM VM IP detected: ${vm_ip}" >&2
-            # Auto-eject the CD-ROM now that install is complete and VM is up
-            echo "[INFO]  Ejecting CD-ROM (ide2)..." >&2
-            qm set "${VM_ID}" --ide2 none,media=cdrom 2>/dev/null                 && echo "[OK]    CD-ROM ejected." >&2                 || echo "[WARN]  Could not eject CD-ROM — remove it manually in PVE UI." >&2
+            # Eject CD-ROM here too in case reboot detection was missed
+            if [[ $cdrom_ejected -eq 0 ]]; then
+                echo "[INFO]  Ejecting CD-ROM (ide2)..." >&2
+                qm set "${VM_ID}" --ide2 none,media=cdrom 2>/dev/null \
+                    && echo "[OK]    CD-ROM ejected." >&2 \
+                    || echo "[WARN]  Could not eject CD-ROM — remove it manually in PVE UI." >&2
+            fi
             echo "${vm_ip}"   # <-- only this goes to stdout / $()
             return 0
         fi
@@ -337,6 +369,7 @@ get_vm_ip() {
         if   [[ $elapsed -lt 60 ]];  then phase_msg="VM booting, loading installer..."
         elif [[ $elapsed -lt 180 ]]; then phase_msg="PDM installation in progress (partitioning/packages)..."
         elif [[ $elapsed -lt 300 ]]; then phase_msg="Finalising install, first reboot imminent..."
+        elif [[ $reboot_detected -eq 1 ]]; then phase_msg="PDM first boot — services starting up..."
         elif [[ $elapsed -lt 420 ]]; then phase_msg="PDM first boot — services starting up..."
         else                               phase_msg="Still waiting — install may be slow or check console."
         fi
