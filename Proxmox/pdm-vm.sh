@@ -21,6 +21,7 @@
 #   - proxmox-auto-install-assistant (auto-installed if missing, ships with PVE 9.x)
 #   - Your self-hosted Netbird management URL and setup key
 # =============================================================================
+# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/Proxmox/pdm-vm.sh)"
 
 set -euo pipefail
 
