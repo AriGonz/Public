@@ -4,11 +4,9 @@
 # Universal Proxmox repository configurator & system updater
 # Supports: PVE 9.x | PBS | PDM
 #
-# Usage:
-#   wget -O proxmox-update.sh https://raw.githubusercontent.com/AriGonz/Public/main/Proxmox/proxmox-update.sh
-#   chmod +x proxmox-update.sh
-#   ./proxmox-update.sh
-#
+# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/Proxmox/proxmox-update.sh)"
+
+# Usage  : curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/Proxmox/proxmox-update.sh -o proxmox-update.sh && less proxmox-update.sh && chmod +x proxmox-update.sh && ./proxmox-update.sh
 # What this script does:
 #   1. Detects the installed Proxmox product (PVE / PBS / PDM)
 #   2. Detects the Debian codename (bookworm / trixie)
