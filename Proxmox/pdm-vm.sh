@@ -29,7 +29,7 @@ set -euo pipefail
 # !! CONFIGURE THESE BEFORE RUNNING !!
 # =============================================================================
 
-SCRIPT_VERSION="0.8"
+SCRIPT_VERSION="0.9"
 
 # --- VM Settings ---
 VM_ID=200                          # Change if 200 is already taken
@@ -306,17 +306,30 @@ stage_create_vm() {
 # Stage 4: Wait for PDM to Boot & Get IP
 # =============================================================================
 
-# NOTE: This function prints status to stderr so it stays visible when called
-# inside $() command substitution. Only the final IP is echoed to stdout.
+# Polls the QEMU guest agent for the VM's DHCP IP after install.
+#
+# Design notes:
+#   - Does NOT use $() subshell — writes IP to a temp file instead.
+#     This avoids the set -euo pipefail silent-exit bug where any failing
+#     guest agent call inside a subshell would abort the whole function.
+#   - Guest agent returns JSON; we parse it with python3 (always present on PVE).
+#   - Proactively ejects the CD-ROM at CDROM_EJECT_AT seconds while the
+#     installer is still running. By that point all packages are on disk and
+#     the ISO is no longer needed. This prevents the VM from booting back into
+#     the installer after the reboot that ends the install.
+#
+# Usage: get_vm_ip   (sets VM_IP global variable; does NOT echo/return the IP)
+VM_IP=""
 get_vm_ip() {
-    echo "[INFO]  Stage 4: Waiting for PDM to install, reboot, and obtain a DHCP IP..." >&2
-    echo "[INFO]  Polling every ${SSH_RETRY_INTERVAL}s — status updates will appear below." >&2
-    echo "" >&2
+    info "Stage 4: Waiting for PDM to install, reboot, and obtain a DHCP IP..."
+    info "Polling every 2s — status updates will appear below."
+    echo ""
 
     local elapsed=0
-    local vm_ip=""
     local vm_status=""
     local cdrom_ejected=0
+    local _ip_file
+    _ip_file=$(mktemp /tmp/pdm-ip-XXXXXX)
 
     # PDM installer extracts everything to disk early in the process and only
     # reads the ISO during initial boot. By the time packages are being configured
@@ -326,73 +339,97 @@ get_vm_ip() {
     # the running→stopped→running transition which happens in <2s.
     local CDROM_EJECT_AT=150   # seconds after VM start to proactively eject ISO
 
-    echo "[INFO]  Phase 1: Installing PDM (CD-ROM will be ejected at ${CDROM_EJECT_AT}s)..." >&2
+    info "Phase 1: Installing PDM (CD-ROM will be ejected at ${CDROM_EJECT_AT}s)..."
 
     while [[ $elapsed -lt $SSH_WAIT_SECONDS ]]; do
-        vm_status=$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}' || echo "unknown")
 
-        # Proactive eject: remove ISO while VM is still running the installer.
-        # The installer has already extracted packages to disk by this point.
+        # Get VM status — never let this abort the loop
+        vm_status=$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}') || vm_status="unknown"
+
+        # ── Proactive CD-ROM eject ──────────────────────────────────────────
+        # Remove ISO while VM is still running the installer so that when the
+        # installer reboots the VM it boots from disk, not the ISO again.
         if [[ $elapsed -ge $CDROM_EJECT_AT && $cdrom_ejected -eq 0 ]]; then
-            echo "" >&2
-            echo "[INFO]  ${CDROM_EJECT_AT}s elapsed — proactively ejecting CD-ROM while installer runs..." >&2
+            echo ""
+            info "${CDROM_EJECT_AT}s elapsed — proactively ejecting CD-ROM while installer runs..."
             if qm set "${VM_ID}" --ide2 none,media=cdrom 2>/dev/null; then
-                echo "[OK]    CD-ROM ejected. VM will boot from disk after install completes." >&2
+                success "CD-ROM ejected. VM will boot from disk after install completes."
             else
-                echo "[WARN]  Could not eject CD-ROM — remove it manually in PVE UI." >&2
+                warn "Could not eject CD-ROM — remove it manually in PVE UI if needed."
             fi
-            # Re-enable onboot so VM restarts itself after installer shuts it down
+            # Re-enable onboot so VM auto-starts after the installer shuts it down
             qm set "${VM_ID}" --onboot 1 2>/dev/null || true
             cdrom_ejected=1
+            info "Phase 2: Waiting for install to finish and VM to reboot..."
         fi
 
-        # Once installer is done the VM stops then auto-restarts (onboot 1).
-        # After that, wait for the guest agent to report an IP.
-        if [[ $cdrom_ejected -eq 1 ]]; then
-            vm_ip=$(qm guest exec "${VM_ID}" -- hostname -I 2>/dev/null \
-                | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
-                | grep -v '^127\.' \
-                | head -1 || true)
+        # ── IP detection via QEMU guest agent ──────────────────────────────
+        # Only attempt once CD-ROM is ejected (VM may still be in install phase).
+        # qm guest exec returns JSON like:
+        #   {"exitcode":0,"out-data":"192.168.1.5 \n","err-data":""}
+        # We parse out-data with python3 (always available on PVE hosts).
+        if [[ $cdrom_ejected -eq 1 && $vm_status == "running" ]]; then
+            local raw_json detected_ip
+            raw_json=$(qm guest exec "${VM_ID}" -- hostname -I 2>/dev/null) || raw_json=""
 
-            if [[ -n "${vm_ip}" ]]; then
-                echo "" >&2
-                echo "[OK]    PDM VM IP detected: ${vm_ip}" >&2
-                echo "${vm_ip}"
-                return 0
+            if [[ -n "$raw_json" ]]; then
+                detected_ip=$(python3 -c "
+import sys, json, re
+try:
+    data = json.loads('''${raw_json}''')
+    out = data.get('out-data', '')
+    ips = re.findall(r'(?:[0-9]{1,3}\.){3}[0-9]{1,3}', out)
+    routable = [ip for ip in ips if not ip.startswith('127.')]
+    print(routable[0] if routable else '')
+except Exception:
+    print('')
+" 2>/dev/null) || detected_ip=""
+
+                if [[ -n "$detected_ip" ]]; then
+                    echo ""
+                    success "PDM DHCP IP detected via guest agent: ${detected_ip}"
+                    echo "${detected_ip}" > "${_ip_file}"
+                    break
+                fi
             fi
         fi
 
-        # Status line every 10s
+        # ── Status line every 10s ───────────────────────────────────────────
         if (( elapsed % 10 == 0 )); then
             local phase_msg=""
-            if   [[ $elapsed -lt 60 ]];  then phase_msg="VM booting, loading installer..."
-            elif [[ $elapsed -lt $CDROM_EJECT_AT ]]; then phase_msg="PDM installation in progress..."
-            elif [[ $elapsed -lt 330 ]]; then phase_msg="Installer running, CD-ROM ejected, waiting for reboot..."
-            elif [[ $elapsed -lt 420 ]]; then phase_msg="PDM first boot — services starting up..."
-            else                               phase_msg="Still waiting — check console if concerned."
+            if   [[ $elapsed -lt 60 ]];               then phase_msg="VM booting, loading installer..."
+            elif [[ $elapsed -lt $CDROM_EJECT_AT ]];  then phase_msg="PDM installation in progress..."
+            elif [[ $elapsed -lt 330 ]];              then phase_msg="Installer running, CD-ROM ejected, waiting for reboot..."
+            elif [[ $elapsed -lt 420 ]];              then phase_msg="PDM first boot — services starting up..."
+            else                                           phase_msg="Still waiting — check console if concerned."
             fi
-            printf "  [%3ds]  VM status: %-10s  %s\n" "${elapsed}" "${vm_status}" "${phase_msg}" >&2
+            printf "  [%3ds]  VM status: %-10s  %s\n" "${elapsed}" "${vm_status}" "${phase_msg}"
         fi
 
         sleep 2
         elapsed=$((elapsed + 2))
     done
 
-    if [[ $cdrom_ejected -eq 0 ]]; then
-        echo "" >&2
-        echo "[WARN]  Timed out before CD-ROM eject point. Install may have failed." >&2
-        echo "[WARN]    1. Check PVE web UI > VM ${VM_ID} > Console" >&2
-        echo "[WARN]    2. Manually eject the CD-ROM, then run: ./setup-pdm-vm.sh netbird <IP>" >&2
+    # Read result from temp file (avoids subshell return value problem)
+    VM_IP=$(cat "${_ip_file}" 2>/dev/null || true)
+    rm -f "${_ip_file}"
+
+    if [[ -z "$VM_IP" ]]; then
+        echo ""
+        if [[ $cdrom_ejected -eq 0 ]]; then
+            warn "Timed out before the CD-ROM eject point. The install may have stalled."
+            warn "  1. Check PVE web UI > VM ${VM_ID} > Console"
+            warn "  2. Manually eject the CD-ROM if still attached"
+            warn "  3. Once PDM has booted, run:  $0 netbird <PDM_IP>"
+        else
+            warn "Could not detect VM IP after ${SSH_WAIT_SECONDS}s."
+            warn "  1. Check your DHCP server for a lease assigned to '${VM_NAME}'"
+            warn "  2. Or check PVE web UI > VM ${VM_ID} > Console for the IP"
+            warn "  3. Once you have the IP, run:  $0 netbird <PDM_IP>"
+        fi
         echo ""
         return 1
     fi
-
-    echo "" >&2
-    echo "[WARN]  Could not automatically detect VM IP after ${SSH_WAIT_SECONDS}s." >&2
-    echo "[WARN]    1. Check PVE web UI > VM ${VM_ID} > Console" >&2
-    echo "[WARN]    2. Check your DHCP server for a lease assigned to '${VM_NAME}'" >&2
-    echo "[WARN]    3. Once booted, run:  ./setup-pdm-vm.sh netbird <PDM_IP>" >&2
-    echo ""
 }
 
 # =============================================================================
@@ -517,10 +554,9 @@ main() {
             stage_iso
             stage_answer_file
             stage_create_vm
-            local vm_ip
-            vm_ip=$(get_vm_ip)
-            if [[ -n "${vm_ip}" ]]; then
-                install_netbird "${vm_ip}"
+            get_vm_ip   # sets global VM_IP; no subshell — avoids set -e silent exit
+            if [[ -n "${VM_IP}" ]]; then
+                install_netbird "${VM_IP}"
             fi
             ;;
         iso)
