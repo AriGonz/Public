@@ -4,9 +4,9 @@
 # Universal Proxmox repository configurator & system updater
 # Supports: PVE 9.x | PBS | PDM
 #
-# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/Proxmox/proxmox-update.sh)"
+# Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/Proxmox/shared/proxmox-update.sh)"
 
-# Usage  : curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/main/Proxmox/proxmox-update.sh -o proxmox-update.sh && less proxmox-update.sh && chmod +x proxmox-update.sh && ./proxmox-update.sh
+# Usage  : curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/Proxmox/shared/proxmox-update.sh -o proxmox-update.sh && less proxmox-update.sh && chmod +x proxmox-update.sh && ./proxmox-update.sh
 # What this script does:
 #   1. Detects the installed Proxmox product (PVE / PBS / PDM)
 #   2. Detects the Debian codename (bookworm / trixie)
@@ -24,7 +24,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.0"
+SCRIPT_VERSION="1.1"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -185,6 +185,7 @@ _disable_sources_file() {
 }
 
 # Disable all enterprise/subscription repos for the detected product
+# Also disables Ceph enterprise repos which are present on PVE nodes.
 disable_enterprise_repos() {
     step "Disabling enterprise/subscription repositories..."
 
@@ -194,6 +195,10 @@ disable_enterprise_repos() {
         pve) targets=(
                 "/etc/apt/sources.list.d/pve-enterprise.list"
                 "/etc/apt/sources.list.d/pve-enterprise.sources"
+                # Ceph enterprise repos — present on PVE nodes regardless of
+                # whether Ceph is actively used; always safe to disable.
+                "/etc/apt/sources.list.d/ceph.list"
+                "/etc/apt/sources.list.d/ceph.sources"
             ) ;;
         pbs) targets=(
                 "/etc/apt/sources.list.d/pbs-enterprise.list"
@@ -279,13 +284,47 @@ add_no_subscription_repo() {
     REPOS_CONFIGURED+=("added: ${no_sub_file##*/}")
 }
 
+# Returns true if a given URL+suite combo is already configured in ANY active
+# repo source — handles both .list format (deb ...) and .sources format
+# (URIs: / Suites: stanzas). Checks both enabled and to-be-enabled state.
+_repo_already_present() {
+    local url="$1" suite="$2"
+
+    # 1. Check .list files — uncommented deb lines
+    if grep -rh '^\s*deb\s' /etc/apt/sources.list.d/ /etc/apt/sources.list 2>/dev/null \
+            | grep -q "${url}.*${suite}"; then
+        return 0
+    fi
+
+    # 2. Check .sources files (DEB822 format) — look for the URL in URIs: lines
+    #    and the suite in Suites: lines within the same stanza.
+    #    Strategy: scan each .sources file; if a stanza contains both the URL
+    #    and the suite and is NOT explicitly disabled, consider it present.
+    local sf
+    for sf in /etc/apt/sources.list.d/*.sources 2>/dev/null; do
+        [[ -f "${sf}" ]] || continue
+
+        # Skip fully disabled stanzas
+        if grep -qi '^\s*Enabled\s*:\s*no' "${sf}" 2>/dev/null; then
+            continue
+        fi
+
+        if grep -q "${url}" "${sf}" 2>/dev/null \
+                && grep -q "\b${suite}\b" "${sf}" 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # Ensure standard Debian repos are present and correct
 ensure_debian_repos() {
     step "Ensuring standard Debian repositories are present..."
 
     local debian_list="/etc/apt/sources.list"
 
-    # The three lines we need
+    # The three lines we need (written as .list format into sources.list)
     local -a required_lines=(
         "deb http://deb.debian.org/debian ${CODENAME} main contrib"
         "deb http://deb.debian.org/debian ${CODENAME}-updates main contrib"
@@ -295,13 +334,12 @@ ensure_debian_repos() {
     local added=0
 
     for line in "${required_lines[@]}"; do
-        # Check across all .list and main sources.list (uncommented lines only)
         local url suite
         url=$(echo "${line}" | awk '{print $2}')
         suite=$(echo "${line}" | awk '{print $3}')
 
-        if grep -rh '^\s*deb\s' /etc/apt/sources.list.d/ "${debian_list}" 2>/dev/null \
-                | grep -q "${url}.*${suite}"; then
+        # Use helper that understands both .list and .sources formats
+        if _repo_already_present "${url}" "${suite}"; then
             info "Already present: ${line}"
         else
             echo "${line}" >> "${debian_list}"
