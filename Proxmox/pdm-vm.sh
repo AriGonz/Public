@@ -28,7 +28,7 @@ set -euo pipefail
 # !! CONFIGURE THESE BEFORE RUNNING !!
 # =============================================================================
 
-SCRIPT_VERSION="0.6"
+SCRIPT_VERSION="0.7"
 
 # --- VM Settings ---
 VM_ID=200                          # Change if 200 is already taken
@@ -269,14 +269,18 @@ stage_create_vm() {
         --scsihw virtio-scsi-pci \
         --scsi0 "${VM_DISK_STORAGE}:${VM_DISK_SIZE},format=raw" \
         --agent enabled=1 \
-        --onboot 1 \
+        --onboot 0 \
         --tablet 0
 
-    # Attach ISO as ide2 cdrom separately — more reliable than inline with create
+    # Attach ISO as ide2 cdrom
     qm set "${VM_ID}" --ide2 "${VM_STORAGE}:iso/pdm-unattended.iso,media=cdrom"
 
-    # Set boot order: ISO first, disk second
-    qm set "${VM_ID}" --boot "order=ide2;scsi0"
+    # Boot order: disk first, ISO second.
+    # proxmox-auto-install-assistant patches the ISO's own GRUB to auto-select
+    # the unattended installer, so it installs correctly regardless of PVE boot
+    # order. After install the VM shuts down; we then eject the ISO and start it
+    # fresh — booting from disk with no risk of looping back into the installer.
+    qm set "${VM_ID}" --boot "order=scsi0;ide2"
 
     # Verify cdrom is actually attached before starting
     info "Verifying hardware configuration..."
@@ -292,9 +296,9 @@ stage_create_vm() {
     info "Starting VM ${VM_ID}..."
     qm start "${VM_ID}"
     success "VM started. PDM installer is running."
-    info "Boot order: ISO (ide2) → disk (scsi0)."
-    info "NOTE: Do NOT manually remove the CD-ROM — the script will eject it automatically."
-    info "      Watch the console if you want to monitor install progress."
+    info "Boot order: disk (scsi0) → ISO (ide2). ISO GRUB auto-selects unattended install."
+    info "NOTE: --onboot 0 is set so the VM stays off after install completes."
+    info "      The script will eject the ISO then start the VM for its first real boot."
 }
 
 # =============================================================================
@@ -315,36 +319,67 @@ get_vm_ip() {
     local reboot_detected=0
     local was_running=0
 
-    while [[ $elapsed -lt $SSH_WAIT_SECONDS ]]; do
-        # Get current VM power status
+    # Phase 1: Wait for installer to finish (VM goes running → stopped).
+    # We use a tight 2s poll here so we never miss the stopped window.
+    # --onboot 0 is set on the VM so PVE will NOT auto-restart it after shutdown.
+    echo "[INFO]  Phase 1: Watching for installer to finish (VM will stop when done)..." >&2
+    while [[ $elapsed -lt $SSH_WAIT_SECONDS && $cdrom_ejected -eq 0 ]]; do
         vm_status=$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}' || echo "unknown")
 
-        # Detect install-complete reboot: VM transitions running → stopped → running.
-        # We eject the CD-ROM the moment the VM stops (end of installer), so when it
-        # comes back up it boots from disk (the installed OS) instead of the ISO again.
         if [[ "${vm_status}" == "running" ]]; then
             was_running=1
-        elif [[ "${vm_status}" == "stopped" && $was_running -eq 1 && $cdrom_ejected -eq 0 ]]; then
+        elif [[ "${vm_status}" == "stopped" && $was_running -eq 1 ]]; then
             echo "" >&2
-            echo "[INFO]  Installer finished — VM stopped for first reboot." >&2
-            echo "[INFO]  Ejecting CD-ROM (ide2) so next boot uses the disk..." >&2
+            echo "[OK]    Installer finished — VM has stopped cleanly." >&2
+            echo "[INFO]  Ejecting CD-ROM (ide2) before first real boot..." >&2
             if qm set "${VM_ID}" --ide2 none,media=cdrom 2>/dev/null; then
-                echo "[OK]    CD-ROM ejected. VM will boot from disk on next start." >&2
+                echo "[OK]    CD-ROM ejected." >&2
             else
-                echo "[WARN]  Could not eject CD-ROM automatically. Remove it in the PVE UI before the VM restarts." >&2
+                echo "[WARN]  Could not eject CD-ROM — remove it manually in PVE UI before continuing." >&2
             fi
+            # Re-enable onboot now that install is done
+            qm set "${VM_ID}" --onboot 1 2>/dev/null || true
             cdrom_ejected=1
             reboot_detected=1
-            # PVE with --onboot 1 should restart the VM automatically; if not, start it
-            sleep 3
-            if [[ "$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}')" != "running" ]]; then
-                echo "[INFO]  Starting VM for first boot of installed PDM..." >&2
-                qm start "${VM_ID}" 2>/dev/null || true
-            fi
-            was_running=0
+            echo "[INFO]  Starting VM for first real boot from disk..." >&2
+            qm start "${VM_ID}" 2>/dev/null || true
+            echo "" >&2
+            break
         fi
 
-        # Try to get IP via qemu-guest-agent (only works once agent is running post-install)
+        # Status line every 10s, tight poll every 2s
+        if (( elapsed % 10 == 0 )); then
+            local phase_msg=""
+            if   [[ $elapsed -lt 60 ]];  then phase_msg="VM booting, loading installer..."
+            elif [[ $elapsed -lt 180 ]]; then phase_msg="PDM installation in progress (partitioning/packages)..."
+            elif [[ $elapsed -lt 300 ]]; then phase_msg="Finalising install, shutdown imminent..."
+            else                               phase_msg="Still installing — may be slow, check console."
+            fi
+            printf "  [%3ds]  VM status: %-10s  %s\n" "${elapsed}" "${vm_status}" "${phase_msg}" >&2
+        fi
+
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    if [[ $cdrom_ejected -eq 0 ]]; then
+        echo "" >&2
+        echo "[WARN]  Timed out waiting for installer to finish after ${SSH_WAIT_SECONDS}s." >&2
+        echo "[WARN]  Options:" >&2
+        echo "[WARN]    1. Check PVE web UI > VM ${VM_ID} > Console to see installer progress" >&2
+        echo "[WARN]    2. Once install finishes and VM is stopped, manually eject the CD-ROM" >&2
+        echo "[WARN]       then run:  ./setup-pdm-vm.sh netbird <PDM_IP>" >&2
+        echo ""
+        return 1
+    fi
+
+    # Phase 2: Wait for first real boot and guest agent IP
+    echo "[INFO]  Phase 2: Waiting for PDM first boot and guest agent IP..." >&2
+    local boot_elapsed=0
+    local boot_timeout=300  # 5 min should be plenty for first boot
+    while [[ $boot_elapsed -lt $boot_timeout ]]; do
+        vm_status=$(qm status "${VM_ID}" 2>/dev/null | awk '{print $2}' || echo "unknown")
+
         vm_ip=$(qm guest exec "${VM_ID}" -- hostname -I 2>/dev/null \
             | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
             | grep -v '^127\.' \
@@ -353,33 +388,25 @@ get_vm_ip() {
         if [[ -n "${vm_ip}" ]]; then
             echo "" >&2
             echo "[OK]    PDM VM IP detected: ${vm_ip}" >&2
-            # Eject CD-ROM here too in case reboot detection was missed
-            if [[ $cdrom_ejected -eq 0 ]]; then
-                echo "[INFO]  Ejecting CD-ROM (ide2)..." >&2
-                qm set "${VM_ID}" --ide2 none,media=cdrom 2>/dev/null \
-                    && echo "[OK]    CD-ROM ejected." >&2 \
-                    || echo "[WARN]  Could not eject CD-ROM — remove it manually in PVE UI." >&2
-            fi
-            echo "${vm_ip}"   # <-- only this goes to stdout / $()
+            echo "${vm_ip}"
             return 0
         fi
 
-        # Describe what is likely happening based on elapsed time
-        local phase_msg=""
-        if   [[ $elapsed -lt 60 ]];  then phase_msg="VM booting, loading installer..."
-        elif [[ $elapsed -lt 180 ]]; then phase_msg="PDM installation in progress (partitioning/packages)..."
-        elif [[ $elapsed -lt 300 ]]; then phase_msg="Finalising install, first reboot imminent..."
-        elif [[ $reboot_detected -eq 1 ]]; then phase_msg="PDM first boot — services starting up..."
-        elif [[ $elapsed -lt 420 ]]; then phase_msg="PDM first boot — services starting up..."
-        else                               phase_msg="Still waiting — install may be slow or check console."
+        if (( boot_elapsed % 10 == 0 )); then
+            printf "  [%3ds]  VM status: %-10s  PDM first boot — services starting up...\n" \
+                "${boot_elapsed}" "${vm_status}" >&2
         fi
 
-        printf "  [%3ds]  VM status: %-10s  %s\n" \
-            "${elapsed}" "${vm_status}" "${phase_msg}" >&2
-
-        sleep "${SSH_RETRY_INTERVAL}"
-        elapsed=$((elapsed + SSH_RETRY_INTERVAL))
+        sleep 2
+        boot_elapsed=$((boot_elapsed + 2))
     done
+
+    echo "" >&2
+    echo "[WARN]  Could not automatically detect VM IP after first boot." >&2
+    echo "[WARN]    1. Check PVE web UI > VM ${VM_ID} > Console" >&2
+    echo "[WARN]    2. Check your DHCP server for a lease assigned to '${VM_NAME}'" >&2
+    echo "[WARN]    3. Once booted, run:  ./setup-pdm-vm.sh netbird <PDM_IP>" >&2
+    echo ""
 
     echo "" >&2
     echo "[WARN]  Could not automatically detect VM IP after ${SSH_WAIT_SECONDS}s." >&2
