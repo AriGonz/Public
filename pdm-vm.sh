@@ -28,7 +28,7 @@ set -euo pipefail
 # !! CONFIGURE THESE BEFORE RUNNING !!
 # =============================================================================
 
-SCRIPT_VERSION="0.3"
+SCRIPT_VERSION="0.5"
 
 # --- VM Settings ---
 VM_ID=200                          # Change if 200 is already taken
@@ -256,6 +256,7 @@ stage_create_vm() {
 
     local answer_iso="${ISO_DIR}/pdm-unattended.iso"
 
+    # Create VM without ISO first
     qm create "${VM_ID}" \
         --name "${VM_NAME}" \
         --memory "${VM_RAM}" \
@@ -267,18 +268,33 @@ stage_create_vm() {
         --ostype l26 \
         --scsihw virtio-scsi-pci \
         --scsi0 "${VM_DISK_STORAGE}:${VM_DISK_SIZE},format=raw" \
-        --ide2 "${VM_STORAGE}:iso/pdm-unattended.iso,media=cdrom" \
-        --boot "order=ide2;scsi0" \
         --agent enabled=1 \
         --onboot 1 \
         --tablet 0
+
+    # Attach ISO as ide2 cdrom separately — more reliable than inline with create
+    qm set "${VM_ID}" --ide2 "${VM_STORAGE}:iso/pdm-unattended.iso,media=cdrom"
+
+    # Set boot order: ISO first, disk second
+    qm set "${VM_ID}" --boot "order=ide2;scsi0"
+
+    # Verify cdrom is actually attached before starting
+    info "Verifying hardware configuration..."
+    local hw_check
+    hw_check=$(qm config "${VM_ID}" | grep "ide2" || true)
+    if [[ -z "${hw_check}" ]]; then
+        error "CD-ROM (ide2) failed to attach. Cannot boot installer. Check storage config."
+    fi
+    success "CD-ROM verified: ${hw_check}"
 
     success "VM ${VM_ID} created."
 
     info "Starting VM ${VM_ID}..."
     qm start "${VM_ID}"
     success "VM started. PDM installer is running."
-    info "Boot order: installer will run from ISO, then reboot to disk."
+    info "Boot order: ISO (ide2) → disk (scsi0)."
+    info "NOTE: Do NOT manually remove the CD-ROM — the script will eject it automatically."
+    info "      Watch the console if you want to monitor install progress."
 }
 
 # =============================================================================
@@ -309,6 +325,9 @@ get_vm_ip() {
         if [[ -n "${vm_ip}" ]]; then
             echo "" >&2
             echo "[OK]    PDM VM IP detected: ${vm_ip}" >&2
+            # Auto-eject the CD-ROM now that install is complete and VM is up
+            echo "[INFO]  Ejecting CD-ROM (ide2)..." >&2
+            qm set "${VM_ID}" --ide2 none,media=cdrom 2>/dev/null                 && echo "[OK]    CD-ROM ejected." >&2                 || echo "[WARN]  Could not eject CD-ROM — remove it manually in PVE UI." >&2
             echo "${vm_ip}"   # <-- only this goes to stdout / $()
             return 0
         fi
