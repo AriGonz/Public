@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.1"
+SCRIPT_VERSION="1.2"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -300,7 +300,7 @@ _repo_already_present() {
     #    Strategy: scan each .sources file; if a stanza contains both the URL
     #    and the suite and is NOT explicitly disabled, consider it present.
     local sf
-    for sf in /etc/apt/sources.list.d/*.sources 2>/dev/null; do
+    for sf in /etc/apt/sources.list.d/*.sources; do
         [[ -f "${sf}" ]] || continue
 
         # Skip fully disabled stanzas
@@ -317,27 +317,63 @@ _repo_already_present() {
     return 1
 }
 
-# Ensure standard Debian repos are present and correct
+# Ensure standard Debian repos are present and correct.
+#
+# PVE 9 ships /etc/apt/sources.list.d/debian.sources (DEB822 format) which
+# already covers main, updates, and security.  On those systems sources.list
+# should stay empty to avoid duplicate-source warnings from apt.
+# On older installs or PBS/PDM nodes that lack debian.sources, we fall back to
+# writing the classic deb lines into /etc/apt/sources.list.
 ensure_debian_repos() {
     step "Ensuring standard Debian repositories are present..."
 
+    local debian_sources="/etc/apt/sources.list.d/debian.sources"
     local debian_list="/etc/apt/sources.list"
 
-    # The three lines we need (written as .list format into sources.list)
-    local -a required_lines=(
+    # The three repo URL+suite pairs we need covered
+    local -a required=(
+        "http://deb.debian.org/debian|${CODENAME}"
+        "http://deb.debian.org/debian|${CODENAME}-updates"
+        "http://security.debian.org/debian-security|${CODENAME}-security"
+    )
+
+    # Check whether debian.sources already covers everything
+    local all_present=true
+    for entry in "${required[@]}"; do
+        local url suite
+        url="${entry%%|*}"
+        suite="${entry##*|}"
+        if ! _repo_already_present "${url}" "${suite}"; then
+            all_present=false
+            break
+        fi
+    done
+
+    if ${all_present}; then
+        success "All standard Debian repos already present (via debian.sources or sources.list)."
+        # Ensure sources.list doesn't duplicate what debian.sources provides —
+        # wipe any deb.debian.org / security.debian.org lines from sources.list
+        # so apt doesn't warn about duplicate sources.
+        if grep -qE 'deb\.debian\.org|security\.debian\.org' "${debian_list}" 2>/dev/null; then
+            sed -i '/deb\.debian\.org\|security\.debian\.org/d' "${debian_list}"
+            info "Removed redundant Debian lines from ${debian_list} (covered by debian.sources)."
+            REPOS_CONFIGURED+=("cleaned redundant lines from sources.list")
+        fi
+        return 0
+    fi
+
+    # debian.sources absent or incomplete — write classic .list lines
+    local -a missing_lines=(
         "deb http://deb.debian.org/debian ${CODENAME} main contrib"
         "deb http://deb.debian.org/debian ${CODENAME}-updates main contrib"
         "deb http://security.debian.org/debian-security ${CODENAME}-security main contrib"
     )
 
     local added=0
-
-    for line in "${required_lines[@]}"; do
+    for line in "${missing_lines[@]}"; do
         local url suite
         url=$(echo "${line}" | awk '{print $2}')
         suite=$(echo "${line}" | awk '{print $3}')
-
-        # Use helper that understands both .list and .sources formats
         if _repo_already_present "${url}" "${suite}"; then
             info "Already present: ${line}"
         else
