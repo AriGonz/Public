@@ -23,7 +23,8 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.2"
+SCRIPT_VERSION="0.02"
+echo "proxmox-update.sh v${SCRIPT_VERSION}"
 
 # =============================================================================
 # Colors & Output Helpers
