@@ -37,7 +37,7 @@ VM_NAME="pdm"
 VM_CORES=2
 VM_RAM=4096                        # MB
 VM_DISK_SIZE=32                    # GB
-VM_BRIDGE="vmbr0"                  # Your PVE bridge
+VM_BRIDGE="vmbr1"                  # Your PVE bridge (vmbr1 = 172.16.8.x LAN)
 VM_STORAGE="local"                 # ISO storage (local = /var/lib/vz)
 VM_DISK_STORAGE="local-lvm"        # VM disk storage (change if needed e.g. local-zfs)
 
