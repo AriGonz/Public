@@ -6,7 +6,6 @@
 #
 # Usage  : bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/Proxmox/shared/proxmox-update.sh)"
 
-# Usage  : curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/Proxmox/shared/proxmox-update.sh -o proxmox-update.sh && less proxmox-update.sh && chmod +x proxmox-update.sh && ./proxmox-update.sh
 # What this script does:
 #   1. Detects the installed Proxmox product (PVE / PBS / PDM)
 #   2. Detects the Debian codename (bookworm / trixie)
