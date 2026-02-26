@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.03"
+SCRIPT_VERSION="0.04"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -52,6 +52,7 @@ die()     { error "$*"; exit 1; }
 
 PRODUCT=""                   # pve | pbs | pdm
 CF_WAS_INSTALLED=false       # true if we installed cloudflared this run
+CF_REINSTALLED=false         # true if we uninstalled then reinstalled
 CF_TOKEN_USED=false          # true if connected via tunnel token
 CF_LOGGED_IN=false           # true if tunnel login completed successfully
 SETUP_FILE="/root/cloudflared-setup.txt"
@@ -142,6 +143,71 @@ detect_product() {
 
 is_cloudflared_installed() {
     command -v cloudflared &>/dev/null
+}
+
+prompt_reinstall() {
+    local current_ver
+    current_ver=$(cloudflared --version 2>/dev/null | head -1 || echo "version unknown")
+
+    echo ""
+    echo -e "  ${BOLD}cloudflared is already installed:${NC} ${current_ver}"
+    echo ""
+    echo -e "  ${BOLD}[r]${NC} Reinstall — uninstall then reinstall the latest version"
+    echo -e "  ${BOLD}[k]${NC} Keep      — keep the current install and continue"
+    echo ""
+
+    local answer
+    while true; do
+        read -rp "  Your choice [r/k]: " answer
+        case "${answer,,}" in
+            r|reinstall) return 0 ;;
+            k|keep)      return 1 ;;
+            *) echo -e "  ${YELLOW}Please enter r or k.${NC}" ;;
+        esac
+    done
+}
+
+uninstall_cloudflared() {
+    step "Uninstalling cloudflared..."
+
+    # Stop and disable the service if it is running
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        info "Stopping cloudflared service..."
+        systemctl stop cloudflared 2>/dev/null || true
+    fi
+
+    if systemctl is-enabled --quiet cloudflared 2>/dev/null; then
+        info "Disabling cloudflared service..."
+        systemctl disable cloudflared 2>/dev/null || true
+    fi
+
+    # Remove the service unit if cloudflared installed one
+    if command -v cloudflared &>/dev/null; then
+        info "Running: cloudflared service uninstall"
+        cloudflared service uninstall 2>/dev/null || true
+    fi
+
+    # Remove the package via apt
+    info "Removing cloudflared package..."
+    DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y cloudflared 2>/dev/null || true
+
+    # Remove the Cloudflare apt repo and GPG key
+    local sources_file="/etc/apt/sources.list.d/cloudflared.list"
+    local keyring_file="/usr/share/keyrings/cloudflare-main.gpg"
+
+    if [[ -f "${sources_file}" ]]; then
+        rm -f "${sources_file}"
+        info "Removed apt source: ${sources_file}"
+    fi
+
+    if [[ -f "${keyring_file}" ]]; then
+        rm -f "${keyring_file}"
+        info "Removed GPG key: ${keyring_file}"
+    fi
+
+    apt-get update -qq
+
+    success "cloudflared uninstalled successfully."
 }
 
 install_cloudflared() {
@@ -353,8 +419,13 @@ print_recap() {
     cf_version=$(cloudflared --version 2>/dev/null | head -1 || echo "unknown")
 
     local install_label
-    ${CF_WAS_INSTALLED} && install_label="installed during this run" \
-                        || install_label="already present"
+    if ${CF_REINSTALLED}; then
+        install_label="uninstalled and reinstalled this run"
+    elif ${CF_WAS_INSTALLED}; then
+        install_label="installed during this run"
+    else
+        install_label="already present (kept)"
+    fi
 
     local auth_label
     if ${CF_TOKEN_USED}; then
@@ -404,7 +475,13 @@ main() {
     # ── Installation ─────────────────────────────────────────────────────────
     step "Checking cloudflared installation status..."
     if is_cloudflared_installed; then
-        success "cloudflared is already installed: $(cloudflared --version 2>/dev/null | head -1 || echo 'version unknown')"
+        if prompt_reinstall; then
+            uninstall_cloudflared
+            install_cloudflared
+            CF_REINSTALLED=true
+        else
+            success "Keeping existing cloudflared install: $(cloudflared --version 2>/dev/null | head -1 || echo 'version unknown')"
+        fi
     else
         warn "cloudflared is not installed."
         install_cloudflared
