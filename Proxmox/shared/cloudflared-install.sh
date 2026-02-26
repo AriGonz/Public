@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.02"
+SCRIPT_VERSION="0.03"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -229,19 +229,21 @@ run_tunnel_token() {
     info "Running: cloudflared tunnel run --token <redacted>"
     echo ""
 
-    # Install as a systemd service so the tunnel persists across reboots.
-    # cloudflared service install honours the token passed to tunnel run.
-    if cloudflared service install --token "${token}"; then
+    # First: install as a persistent systemd service using the token.
+    # 'cloudflared service install <token>' writes the token into the unit file
+    # so the tunnel reconnects automatically on reboot.
+    if cloudflared service install "${token}" 2>/dev/null; then
         CF_TOKEN_USED=true
         systemctl enable --now cloudflared 2>/dev/null || true
         success "cloudflared service installed and started with the provided token."
         success "The tunnel will reconnect automatically on reboot."
     else
-        # Fallback: run in foreground (user can daemonise manually)
-        warn "Service install failed — attempting direct tunnel run instead."
+        # Fallback: direct tunnel run with --token flag (foreground, no service)
+        warn "Service install failed — attempting: cloudflared tunnel run --token <redacted>"
         if cloudflared tunnel run --token "${token}"; then
             CF_TOKEN_USED=true
             success "Tunnel connected via token (foreground run)."
+            warn "To make it persistent, run:  cloudflared service install ${token}"
         else
             warn "cloudflared tunnel run --token returned a non-zero exit code."
             warn "Check the token and try again:  cloudflared tunnel run --token <token>"
