@@ -10,19 +10,22 @@
 #   1.  Detects the installed Proxmox product (PVE / PBS / PDM)
 #   2.  Checks if cloudflared is already installed
 #   3.  Installs cloudflared via the official Cloudflare apt repo if missing
-#   4.  Asks whether you want to run an interactive tunnel login
-#       (browser-based, generates a cert in ~/.cloudflared/)
-#   5a. If yes: runs  cloudflared tunnel login  and waits for browser auth
-#   5b. If no:  prints the manual login URL and writes instructions to
-#       /root/cloudflared-setup.txt so you can complete it from any browser
-#   6.  Prints a final recap
+#   4.  Asks how you want to authenticate:
+#       [t] Token  — prompts for a tunnel token and runs
+#                    cloudflared tunnel run --token <token>
+#                    then installs it as a persistent systemd service
+#       [l] Login  — runs  cloudflared tunnel login  (browser-based,
+#                    generates a cert in ~/.cloudflared/)
+#       [s] Skip   — writes step-by-step instructions to
+#                    /root/cloudflared-setup.txt for later
+#   5.  Prints a final recap
 #
 # Idempotent — safe to re-run on an already-configured system.
 # =============================================================================
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.01"
+SCRIPT_VERSION="0.02"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -49,6 +52,7 @@ die()     { error "$*"; exit 1; }
 
 PRODUCT=""                   # pve | pbs | pdm
 CF_WAS_INSTALLED=false       # true if we installed cloudflared this run
+CF_TOKEN_USED=false          # true if connected via tunnel token
 CF_LOGGED_IN=false           # true if tunnel login completed successfully
 SETUP_FILE="/root/cloudflared-setup.txt"
 
@@ -177,29 +181,72 @@ install_cloudflared() {
 }
 
 # =============================================================================
-# Tunnel Login
+# Tunnel Authentication
 # =============================================================================
 
-prompt_login() {
+# Returns: 0 = token, 1 = login, 2 = skip
+prompt_auth_method() {
     step "Cloudflare Tunnel Authentication"
     echo ""
-    echo -e "  ${BOLD}Do you want to run the interactive tunnel login now?${NC}"
-    echo -e "  ${CYAN}(This opens a browser auth flow and saves a cert to ~/.cloudflared/)${NC}"
-    echo -e "  ${CYAN}You will need access to a browser on another device.)${NC}"
+    echo -e "  ${BOLD}How do you want to authenticate this tunnel?${NC}"
     echo ""
-    echo -e "  ${BOLD}[y]${NC} Yes — start  cloudflared tunnel login  now"
-    echo -e "  ${BOLD}[n]${NC} No  — save instructions to ${SETUP_FILE} for later"
+    echo -e "  ${BOLD}[t]${NC} Token — I have a tunnel token"
+    echo -e "        ${CYAN}Runs: cloudflared tunnel run --token <token>${NC}"
+    echo -e "        ${CYAN}Installs cloudflared as a persistent systemd service.${NC}"
+    echo ""
+    echo -e "  ${BOLD}[l]${NC} Login — browser-based interactive login"
+    echo -e "        ${CYAN}Runs: cloudflared tunnel login (opens a URL to authorise)${NC}"
+    echo ""
+    echo -e "  ${BOLD}[s]${NC} Skip  — save instructions to ${SETUP_FILE} for later"
     echo ""
 
     local answer
     while true; do
-        read -rp "  Your choice [y/n]: " answer
+        read -rp "  Your choice [t/l/s]: " answer
         case "${answer,,}" in
-            y|yes) return 0 ;;
-            n|no)  return 1 ;;
-            *) echo -e "  ${YELLOW}Please enter y or n.${NC}" ;;
+            t|token) return 0 ;;
+            l|login) return 1 ;;
+            s|skip)  return 2 ;;
+            *) echo -e "  ${YELLOW}Please enter t, l, or s.${NC}" ;;
         esac
     done
+}
+
+run_tunnel_token() {
+    step "Connecting cloudflared with tunnel token..."
+    echo ""
+
+    local token
+    while true; do
+        read -rp "  Enter your tunnel token: " token
+        token="${token// /}"   # strip accidental spaces
+        if [[ -n "${token}" ]]; then
+            break
+        fi
+        echo -e "  ${YELLOW}Token cannot be empty. Try again.${NC}"
+    done
+
+    info "Running: cloudflared tunnel run --token <redacted>"
+    echo ""
+
+    # Install as a systemd service so the tunnel persists across reboots.
+    # cloudflared service install honours the token passed to tunnel run.
+    if cloudflared service install --token "${token}"; then
+        CF_TOKEN_USED=true
+        systemctl enable --now cloudflared 2>/dev/null || true
+        success "cloudflared service installed and started with the provided token."
+        success "The tunnel will reconnect automatically on reboot."
+    else
+        # Fallback: run in foreground (user can daemonise manually)
+        warn "Service install failed — attempting direct tunnel run instead."
+        if cloudflared tunnel run --token "${token}"; then
+            CF_TOKEN_USED=true
+            success "Tunnel connected via token (foreground run)."
+        else
+            warn "cloudflared tunnel run --token returned a non-zero exit code."
+            warn "Check the token and try again:  cloudflared tunnel run --token <token>"
+        fi
+    fi
 }
 
 run_tunnel_login() {
@@ -308,7 +355,9 @@ print_recap() {
                         || install_label="already present"
 
     local auth_label
-    if ${CF_LOGGED_IN}; then
+    if ${CF_TOKEN_USED}; then
+        auth_label="${GREEN}connected via tunnel token — systemd service active${NC}"
+    elif ${CF_LOGGED_IN}; then
         auth_label="${GREEN}authenticated — cert saved to ~/.cloudflared/cert.pem${NC}"
     else
         auth_label="${YELLOW}not yet authenticated — see ${SETUP_FILE}${NC}"
@@ -324,7 +373,7 @@ print_recap() {
     printf "  ${BOLD}%-24s${NC}"       "Auth status:"
     echo -e " ${auth_label}"
 
-    if ! ${CF_LOGGED_IN}; then
+    if ! ${CF_TOKEN_USED} && ! ${CF_LOGGED_IN}; then
         echo ""
         printf "  ${BOLD}%-24s${NC} %s\n" "Instructions file:" "${SETUP_FILE}"
     fi
@@ -360,20 +409,29 @@ main() {
     fi
 
     # ── Authentication ───────────────────────────────────────────────────────
-    if prompt_login; then
-        run_tunnel_login
-        # If login didn't complete, write instructions as fallback
-        if ! ${CF_LOGGED_IN}; then
+    local auth_choice
+    prompt_auth_method; auth_choice=$?
+
+    case "${auth_choice}" in
+        0)  # Token
+            run_tunnel_token
+            ;;
+        1)  # Interactive login
+            run_tunnel_login
+            # If login didn't complete write instructions as fallback
+            if ! ${CF_LOGGED_IN}; then
+                write_setup_instructions "cloudflared tunnel login"
+            fi
+            ;;
+        2)  # Skip
             write_setup_instructions "cloudflared tunnel login"
-        fi
-    else
-        write_setup_instructions "cloudflared tunnel login"
-    fi
+            ;;
+    esac
 
     # ── Recap ────────────────────────────────────────────────────────────────
     print_recap
 
-    if ! ${CF_LOGGED_IN}; then
+    if ! ${CF_TOKEN_USED} && ! ${CF_LOGGED_IN}; then
         warn "ACTION REQUIRED: complete Cloudflare tunnel authentication."
         warn "  Instructions saved to: ${SETUP_FILE}"
         warn "  Run 'cat ${SETUP_FILE}' to review."
