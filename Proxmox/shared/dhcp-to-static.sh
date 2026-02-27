@@ -193,8 +193,18 @@ prepare_interface_for_dhcp() {
 release_existing_lease() {
     local iface="$1"
     log_info "Releasing any existing DHCP lease on $iface..."
+
+    # Ensure /var/lib/dhcp exists (may be absent on fresh PBS/PMG installs)
+    mkdir -p /var/lib/dhcp 2>/dev/null
+
+    # Release any active lease
     dhclient -r "$iface" 2>/dev/null
+
+    # Remove stale lease and PID files that could interfere with the next request.
+    # dhclient -r should clean the PID file but may not if it was already dead.
     rm -f "/var/lib/dhcp/dhclient.${iface}.leases" 2>/dev/null
+    rm -f "/run/dhclient.${iface}.pid" 2>/dev/null
+
     sleep 1
 }
 
@@ -203,6 +213,7 @@ get_dhcp_lease() {
     local iface="$1"
     log_info "Requesting DHCP lease on $iface..."
 
+    mkdir -p /var/lib/dhcp 2>/dev/null
     dhclient -v -1 \
         -pf "/run/dhclient.${iface}.pid" \
         -lf "/var/lib/dhcp/dhclient.${iface}.leases" \
@@ -210,24 +221,24 @@ get_dhcp_lease() {
 
     sleep 2
 
-    local ip prefix gateway
+    local leased_ip leased_prefix leased_gw
 
-    ip=$(ip -4 addr show "$iface" \
+    leased_ip=$(ip -4 addr show "$iface" \
         | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-    prefix=$(ip -4 addr show "$iface" \
+    leased_prefix=$(ip -4 addr show "$iface" \
         | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\K\d+' | head -1)
-    gateway=$(ip route show default dev "$iface" 2>/dev/null \
+    leased_gw=$(ip route show default dev "$iface" 2>/dev/null \
         | awk '{print $3}' | head -1)
 
     # Fallback to global default route if per-interface lookup fails
-    if [ -z "$gateway" ]; then
-        gateway=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
+    if [ -z "$leased_gw" ]; then
+        leased_gw=$(ip route show default 2>/dev/null | awk '{print $3}' | head -1)
     fi
 
-    if [ -n "$ip" ] && [ -n "$gateway" ]; then
-        prefix="${prefix:-24}"
-        log_ok "Lease obtained: IP=$ip/$prefix  GW=$gateway"
-        echo "$ip $gateway $prefix"
+    if [ -n "$leased_ip" ] && [ -n "$leased_gw" ]; then
+        leased_prefix="${leased_prefix:-24}"
+        log_ok "Lease obtained: IP=$leased_ip/$leased_prefix  GW=$leased_gw"
+        echo "$leased_ip $leased_gw $leased_prefix"
     else
         log_warn "DHCP attempt returned no usable IP/gateway."
         echo ""
@@ -239,9 +250,9 @@ get_dhcp_lease() {
 # =============================================================================
 
 apply_static_network_config() {
-    local iface="$1" ip="$2" gateway="$3" prefix="$4" product="$5"
+    local iface="$1" new_ip="$2" gateway="$3" prefix="$4" product="$5"
 
-    log_info "Writing static config: $iface -> $ip/$prefix via $gateway"
+    log_info "Writing static config: $iface -> $new_ip/$prefix via $gateway"
 
     local backup="/etc/network/interfaces.bak.$(date '+%Y%m%d%H%M%S')"
     cp /etc/network/interfaces "$backup"
@@ -255,16 +266,27 @@ apply_static_network_config() {
     dns_servers=$(grep -oP '(?<=dns-nameservers\s).*' /etc/network/interfaces 2>/dev/null | head -1)
     dns_search=$(grep -oP '(?<=dns-search\s).*'       /etc/network/interfaces 2>/dev/null | head -1)
 
-    # Preserve everything that is NOT our target interface's block
+    # Preserve everything that is NOT our target interface's block.
+    # Strategy: track when we enter our interface's block and suppress
+    # all lines until we hit the next top-level directive or EOF.
     awk -v iface="$iface" '
         BEGIN { skip=0 }
-        /^(auto|iface|allow-[a-z]+)[[:space:]]/ {
-            if ($2 == iface) { skip=1; next }
-            else { skip=0 }
+        # A top-level directive line (not indented)
+        /^[^[:space:]]/ {
+            # Is this the start of our target interface block?
+            if (/^(auto|iface|allow-[a-z]+)[[:space:]]/ && $2 == iface) {
+                skip=1
+                next
+            }
+            # It is a different top-level line — stop skipping and print it
+            skip=0
+            print
+            next
         }
-        skip && /^[[:space:]]/ { next }
-        skip && /^[^[:space:]]/ { skip=0 }
-        !skip { print }
+        # Indented/continuation line — suppress if we are inside our block
+        skip { next }
+        # Everything else — print
+        { print }
     ' /etc/network/interfaces > "$tmpfile"
 
     # Append new static block
@@ -272,7 +294,7 @@ apply_static_network_config() {
         echo ""
         echo "auto $iface"
         echo "iface $iface inet static"
-        echo "        address $ip/$prefix"
+        echo "        address $new_ip/$prefix"
         echo "        gateway $gateway"
         [ -n "$dns_servers" ] && echo "        dns-nameservers $dns_servers"
         [ -n "$dns_search"  ] && echo "        dns-search $dns_search"
@@ -293,41 +315,51 @@ apply_static_network_config() {
 }
 
 apply_ip_live() {
-    local iface="$1" ip="$2" gateway="$3" prefix="$4"
+    local iface="$1" new_addr="$2" gateway="$3" prefix="$4"
     log_info "Applying new IP live on $iface (no reboot needed)..."
     ip addr flush dev "$iface" 2>/dev/null
-    ip addr add "$ip/$prefix" dev "$iface" 2>/dev/null
+    ip addr add "$new_addr/$prefix" dev "$iface" 2>/dev/null
     ip route del default 2>/dev/null
     ip route add default via "$gateway" dev "$iface" 2>/dev/null
-    log_ok "Live: $ip/$prefix via $gateway on $iface"
+    log_ok "Live: $new_addr/$prefix via $gateway on $iface"
 }
 
 update_hosts_file() {
-    local ip="$1"
+    local new_ip="$1"
     local hostname fqdn
     hostname=$(hostname -s 2>/dev/null || hostname)
     fqdn=$(hostname --fqdn 2>/dev/null || echo "$hostname")
 
-    log_info "Updating /etc/hosts -> $ip  $fqdn  $hostname"
+    log_info "Updating /etc/hosts -> $new_ip  $fqdn  $hostname"
     cp /etc/hosts "/etc/hosts.bak.$(date '+%Y%m%d%H%M%S')"
 
-    # Remove existing non-loopback entries for this hostname/fqdn
-    sed -i "/^127\./!s/[[:space:]]${hostname}\([[:space:]]\|$\)/ /g" /etc/hosts
-    sed -i "/[[:space:]]${fqdn}\([[:space:]]\|$\)/d"                 /etc/hosts
-    sed -i '/^[0-9a-fA-F:.]*[[:space:]]*$/d'                         /etc/hosts
+    # Escape regex special chars in hostname/fqdn before using in sed patterns.
+    # Dots in FQDNs (e.g. "pve.local") must be literal, not wildcards.
+    local hn_esc fqdn_esc
+    hn_esc=$(printf '%s' "$hostname" | sed 's/[][.*^$\\]/\\&/g')
+    fqdn_esc=$(printf '%s' "$fqdn"   | sed 's/[][.*^$\\]/\\&/g')
 
-    echo "$ip    $fqdn $hostname" >> /etc/hosts
+    # Remove existing non-loopback entries for this hostname/fqdn.
+    # Line 1: replace hostname in any non-127.x line with a space (cleaned up by line 3).
+    # Line 2: delete any line containing the fqdn (catches old IP entries).
+    # Line 3: delete lines that are now a bare IPv4 address with no hostname.
+    # NOTE: 127.x and ::1 loopback lines are never touched.
+    sed -i "/^127\./!s/[[:space:]]${hn_esc}\([[:space:]]\|$\)/ /g" /etc/hosts
+    sed -i "/^127\./!{/[[:space:]]${fqdn_esc}\([[:space:]]\|$\)/d}" /etc/hosts
+    sed -i '/^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}[[:space:]]*$/d' /etc/hosts
+
+    echo "$new_ip    $fqdn $hostname" >> /etc/hosts
     log_ok "/etc/hosts updated."
 }
 
 apply_product_specific_config() {
-    local ip="$1" product="$2"
+    local new_ip="$1" product="$2"
     [ "$UPDATE_PRODUCT_CONFIG" != "true" ] && return
 
     if [ "$product" = "PVE" ] && [ -f /etc/pve/corosync.conf ]; then
         log_warn "PVE CLUSTER DETECTED: /etc/pve/corosync.conf exists."
         log_warn "If the cluster communication IP changed, manually update"
-        log_warn "ring0_addr in /etc/pve/corosync.conf to: $ip"
+        log_warn "ring0_addr in /etc/pve/corosync.conf to: $new_ip"
     fi
 }
 
@@ -367,26 +399,15 @@ save_script_copy() {
 
     log_info "Saving script to $dest ($label)..."
 
-    # Primary method: download a fresh copy from GitHub
-    if command -v curl &>/dev/null; then
-        if curl -fsSL "$GITHUB_URL" -o "$dest" 2>>"$LOG_FILE"; then
-            chmod +x "$dest"
-            log_ok "Downloaded fresh copy -> $dest"
-            return 0
-        else
-            log_warn "curl download failed. Trying fallback..."
-        fi
-    fi
-
-    # Fallback: copy from $0 if it is a real file (won't work when piped via bash -c)
-    if [ -f "$0" ] && [ "$0" != "bash" ] && [ "$0" != "-bash" ]; then
-        cp "$0" "$dest"
+    # Write the already-downloaded script content held in SCRIPT_CONTENT
+    if [ -n "$SCRIPT_CONTENT" ]; then
+        printf '%s\n' "$SCRIPT_CONTENT" > "$dest"
         chmod +x "$dest"
-        log_ok "Copied from \$0 -> $dest"
+        log_ok "Saved -> $dest"
         return 0
     fi
 
-    log_error "Could not save script to $dest."
+    log_error "Could not save script to $dest — SCRIPT_CONTENT is empty."
     log_error "Please manually copy the script to: $dest"
     return 1
 }
@@ -429,6 +450,21 @@ do_install() {
     log_info "========================================================"
     log_info "INSTALLATION STARTED — dhcp-to-static.sh v${SCRIPT_VERSION}"
     log_info "========================================================"
+
+    # Download the script content ONCE from GitHub and hold it in memory.
+    # Both paths are written from this same content — one network call,
+    # guaranteed identical copies, no risk of partial failure.
+    # NOTE: SCRIPT_CONTENT is intentionally a global variable so that
+    # save_script_copy() can access it without it being passed as an argument.
+    log_info "Downloading script from: $GITHUB_URL"
+    SCRIPT_CONTENT=$(curl -fsSL "$GITHUB_URL" 2>>"$LOG_FILE")
+    if [ -z "$SCRIPT_CONTENT" ]; then
+        log_error "Download failed. Check your internet connection and the URL."
+        echo ""
+        echo "ERROR: Could not download script from GitHub. Installation aborted."
+        exit 1
+    fi
+    log_ok "Downloaded successfully (${#SCRIPT_CONTENT} bytes)."
 
     # Save to systemd install path
     save_script_copy "$INSTALL_PATH" "systemd path"
@@ -530,6 +566,8 @@ do_uninstall() {
 # =============================================================================
 
 do_run() {
+    # Ensure log file exists before any log calls
+    touch "$LOG_FILE" 2>/dev/null || true
     rotate_log
 
     log_info "========================================================"
@@ -570,21 +608,45 @@ do_run() {
     # ---- Retry loop ---------------------------------------------------------
     local elapsed=0
     local lease_result=""
+    local loop_start
+    loop_start=$(date +%s)
 
-    while [ "$elapsed" -lt "$MAX_RETRY_DURATION" ]; do
+    while true; do
+        # Check total elapsed wall-clock time before each attempt
+        local now
+        now=$(date +%s)
+        elapsed=$((now - loop_start))
+
+        if [ "$elapsed" -ge "$MAX_RETRY_DURATION" ]; then
+            log_warn "Max retry duration of ${MAX_RETRY_DURATION}s reached."
+            break
+        fi
+
         lease_result=$(get_dhcp_lease "$iface")
 
         if [ -n "$lease_result" ]; then
+            now=$(date +%s)
+            elapsed=$((now - loop_start))
             log_ok "Lease acquired after ${elapsed}s total."
             break
         fi
 
+        now=$(date +%s)
+        elapsed=$((now - loop_start))
         local remaining=$((MAX_RETRY_DURATION - elapsed))
-        [ "$remaining" -le 0 ] && break
 
-        log_warn "Retry in ${RETRY_INTERVAL}s... (${elapsed}s elapsed, ${remaining}s remaining)"
-        sleep "$RETRY_INTERVAL"
-        elapsed=$((elapsed + RETRY_INTERVAL))
+        if [ "$remaining" -le 0 ]; then
+            log_warn "Max retry duration of ${MAX_RETRY_DURATION}s reached."
+            break
+        fi
+
+        local wait_time=$RETRY_INTERVAL
+        if [ "$remaining" -lt "$RETRY_INTERVAL" ]; then
+            wait_time=$remaining
+        fi
+
+        log_warn "Retry in ${wait_time}s... (${elapsed}s elapsed, ${remaining}s remaining)"
+        sleep "$wait_time"
     done
 
     if [ -z "$lease_result" ]; then
