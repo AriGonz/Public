@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.01"
+SCRIPT_VERSION="0.02"
 SCRIPT_NAME="launcher.sh"
 RAW_BASE="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/Proxmox/shared"
 SELF_URL="${RAW_BASE}/${SCRIPT_NAME}"
@@ -55,6 +55,7 @@ SCRIPTS=(
     "netbird-install.sh|Install and connect NetBird VPN on this Proxmox node"
     "cloudflared-install.sh|Install Cloudflare Tunnel (cloudflared) on this Proxmox node"
     "proxmox-remove-nag.sh|Remove the 'No valid subscription' popup from the web UI"
+    "dhcp-to-static.sh|Detect DHCP network settings and lock them in as a static IP (installs as a systemd service)"
 )
 
 # =============================================================================
@@ -127,7 +128,7 @@ fetch_description() {
     # Download just the first 20 lines to avoid a full file fetch
     desc=$(curl -fsSL "${url}" 2>/dev/null \
         | head -20 \
-        | grep -oP '(?<=^# )(?!={3,}|Usage|What|Supports|Idempotent).*' \
+        | grep -oP '(?<=^# )(?!={3,}|Usage|What|Supports|Idempotent|Compatible|USAGE|On ).*' \
         | grep -v "^\s*$" \
         | head -1 \
         || true)
