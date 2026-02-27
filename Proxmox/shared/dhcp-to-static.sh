@@ -18,6 +18,9 @@
 #   Uninstall:
 #     /usr/local/sbin/dhcp-to-static.sh --uninstall
 #
+#   Non-interactive install (no prompts, answers yes automatically):
+#     bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/Proxmox/shared/dhcp-to-static.sh)" -- --yes
+#
 # On first run (install mode), the script:
 #   1. Downloads and saves itself to /usr/local/sbin/ (used by systemd)
 #   2. Saves an offline copy to /root/
@@ -82,7 +85,10 @@ LOG_MAX_SIZE=1048576
 # INTERNAL — Do not edit below unless you know what you are doing
 # =============================================================================
 
-SCRIPT_VERSION="1.1"
+SCRIPT_VERSION="1.2"
+
+# Set to true when --yes flag passed; skips interactive prompts.
+AUTO_YES=false
 
 # =============================================================================
 # LOGGING
@@ -437,7 +443,12 @@ do_install() {
     echo "  MAX_RETRY        : ${MAX_RETRY_DURATION}s"
     echo ""
 
-    read -r -p "Proceed with installation? [y/N] " confirm
+    if [[ "$AUTO_YES" == "true" ]]; then
+        echo "  (--yes flag set: proceeding automatically)"
+        confirm="y"
+    else
+        read -r -p "Proceed with installation? [y/N] " confirm < /dev/tty
+    fi
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         echo "Installation cancelled."
         exit 0
@@ -483,7 +494,12 @@ do_install() {
 
     # Offer to run immediately
     echo ""
-    read -r -p "Run the DHCP-to-static configuration right now? [y/N] " run_now
+    if [[ "$AUTO_YES" == "true" ]]; then
+        echo "  (--yes flag set: starting service automatically)"
+        run_now="y"
+    else
+        read -r -p "Run the DHCP-to-static configuration right now? [y/N] " run_now < /dev/tty
+    fi
     if [[ "$run_now" =~ ^[Yy]$ ]]; then
         echo ""
         log_info "Starting service now..."
@@ -530,7 +546,7 @@ do_uninstall() {
         exit 1
     fi
 
-    read -r -p "Remove dhcp-to-static service and all installed files? [y/N] " confirm
+    read -r -p "Remove dhcp-to-static service and all installed files? [y/N] " confirm < /dev/tty
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         echo "Uninstall cancelled."
         exit 0
@@ -685,19 +701,25 @@ case "${1:-}" in
     --uninstall)
         do_uninstall
         ;;
+    --yes|-y)
+        # Non-interactive install: skip all prompts, answer yes automatically
+        AUTO_YES=true
+        do_install
+        ;;
     --help|-h)
         echo ""
         echo "dhcp-to-static.sh v${SCRIPT_VERSION}"
         echo ""
         echo "Usage:"
-        echo "  Install:   bash -c \"\$(curl -fsSL $GITHUB_URL)\""
-        echo "  Run:       $INSTALL_PATH --run"
-        echo "  Uninstall: $INSTALL_PATH --uninstall"
-        echo "  Help:      $INSTALL_PATH --help"
+        echo "  Install (interactive):    bash -c \"\$(curl -fsSL $GITHUB_URL)\""
+        echo "  Install (non-interactive): bash -c \"\$(curl -fsSL $GITHUB_URL)\" -- --yes"
+        echo "  Run manually:             $INSTALL_PATH --run"
+        echo "  Uninstall:                $INSTALL_PATH --uninstall"
+        echo "  Help:                     $INSTALL_PATH --help"
         echo ""
         ;;
     *)
-        # No argument = curl invocation = install mode
+        # No argument = curl invocation = interactive install mode
         do_install
         ;;
 esac
