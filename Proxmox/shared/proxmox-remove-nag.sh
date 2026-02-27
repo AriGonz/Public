@@ -24,7 +24,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.02"
+SCRIPT_VERSION="0.03"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -170,7 +170,7 @@ patch_file() {
     if [[ ! -f "${file}" ]]; then
         warn "File not found — skipping: ${file}"
         FILES_MISSING+=("${file}")
-        return 1
+        return 0
     fi
 
     # Idempotency check — already patched?
@@ -214,7 +214,12 @@ patch_pve() {
 patch_pbs() {
     step "Patching PBS subscription nag..."
     patch_file "${WIDGET_JS}"
-    patch_file "${PBS_JS}"
+    # PBS_JS is only present on some PBS versions — absence is not an error
+    if [[ -f "${PBS_JS}" ]]; then
+        patch_file "${PBS_JS}"
+    else
+        info "PBS-specific UI library not present on this version — skipping: ${PBS_JS##*/}"
+    fi
 }
 
 patch_pdm() {
