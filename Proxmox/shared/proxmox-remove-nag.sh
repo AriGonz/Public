@@ -24,7 +24,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.01"
+SCRIPT_VERSION="0.02"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -60,8 +60,10 @@ WIDGET_JS="/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js"
 # PBS-specific UI library
 PBS_JS="/usr/share/javascript/proxmox-backup/proxmoxbackuplib.js"
 
-# Patch fingerprint — string that only exists after the patch is applied
-PATCH_SENTINEL="if (false || res"
+# Patch fingerprint — string that only exists after the patch is applied.
+# Pass 1 produces:  void({ //Ext.Msg.show({
+# That is the most reliable sentinel across all PVE/PBS/PDM versions.
+PATCH_SENTINEL='void({ //Ext.Msg.show({'
 
 # =============================================================================
 # Preflight
@@ -152,12 +154,14 @@ backup_file() {
 
 # Apply the nag-removal patch to a single JS file.
 # The patch wraps the Ext.Msg.show "No valid subscription" block in a void()
-# so it is never executed, AND short-circuits the if-condition that gates it
-# by injecting  `if (false || ...`  so the block is never reached.
+# so it is never executed, regardless of what the surrounding if-condition
+# evaluates to.  This single-pass approach is version-agnostic: it does not
+# depend on the exact status comparison string used by a given release
+# (e.g. !== 'active', .toLowerCase() !== 'active', !== 'Active', etc.).
 #
-# Strategy (two-pass, handles all PVE/PBS/PDM versions):
-#   Pass 1 — comment-out the Ext.Msg.show popup block (multiline, -Ezi)
-#   Pass 2 — short-circuit the enclosing if-condition (single-line, -i)
+# Sentinel used to detect an already-patched file:
+#   void({ //Ext.Msg.show({
+# which is the exact output of the sed substitution below.
 #
 # Returns 0 on success, 1 if the file does not exist.
 patch_file() {
@@ -170,7 +174,7 @@ patch_file() {
     fi
 
     # Idempotency check — already patched?
-    if grep -q "${PATCH_SENTINEL}" "${file}" 2>/dev/null; then
+    if grep -qF "${PATCH_SENTINEL}" "${file}" 2>/dev/null; then
         success "Already patched — skipping: ${file}"
         FILES_SKIPPED+=("${file##*/}")
         return 0
@@ -178,21 +182,16 @@ patch_file() {
 
     backup_file "${file}"
 
-    # Pass 1: wrap the Ext.Msg.show "No valid subscription" call in void()
-    # so the popup is silently discarded even if the surrounding if fires.
+    # Wrap the Ext.Msg.show "No valid subscription" call in void() so the
+    # popup dialog is silently discarded.  Uses -Ezi for multiline matching
+    # since the title: line may not immediately follow Ext.Msg.show(.
     sed -Ezi \
         's/(Ext\.Msg\.show\(\{\s*title:\s*gettext\(.No valid sub)/void\(\{ \/\/\1/g' \
         "${file}"
 
-    # Pass 2: short-circuit the if-condition that checks the subscription
-    # status so the popup block is never reached at all.
-    # Targets: if (res === null || res === undefined || !res || res.data ...
-    sed -i \
-        '/res\.data\.status\s*[!=]\{1,2\}=\s*.\(Active\|Ok\)./s/if\s*(res/if (false || res/' \
-        "${file}"
-
-    # Verify patch was applied
-    if grep -q "${PATCH_SENTINEL}" "${file}" 2>/dev/null; then
+    # Verify patch was applied using a fixed-string match (-F) to avoid
+    # any regex interpretation of the sentinel value.
+    if grep -qF "${PATCH_SENTINEL}" "${file}" 2>/dev/null; then
         success "Patched successfully: ${file}"
         FILES_PATCHED+=("${file##*/}")
     else
