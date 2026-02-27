@@ -6,7 +6,7 @@
 # Compatible with:
 #   - Proxmox Virtual Environment (PVE)
 #   - Proxmox Backup Server (PBS)
-#   - Proxmox Mail Gateway (PMG)
+#   - Proxmox Datacenter Manager (PDM)
 #
 # USAGE:
 #   First-time install (from GitHub):
@@ -85,7 +85,7 @@ LOG_MAX_SIZE=1048576
 # INTERNAL — Do not edit below unless you know what you are doing
 # =============================================================================
 
-SCRIPT_VERSION="1.2"
+SCRIPT_VERSION="1.5"
 
 # Set to true when --yes flag passed; skips interactive prompts.
 AUTO_YES=false
@@ -96,7 +96,7 @@ AUTO_YES=false
 
 log() {
     local level="$1"; shift
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" | tee -a "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*" | tee -a "$LOG_FILE" >&2
 }
 log_info()  { log "INFO " "$@"; }
 log_warn()  { log "WARN " "$@"; }
@@ -118,10 +118,10 @@ rotate_log() {
 detect_proxmox_product() {
     if   command -v pveversion            &>/dev/null; then echo "PVE"
     elif command -v proxmox-backup-manager &>/dev/null; then echo "PBS"
-    elif command -v pmgconfig              &>/dev/null; then echo "PMG"
+    elif command -v proxmox-datacenter-manager &>/dev/null; then echo "PDM"
     elif dpkg -l pve-manager              &>/dev/null 2>&1; then echo "PVE"
     elif dpkg -l proxmox-backup           &>/dev/null 2>&1; then echo "PBS"
-    elif dpkg -l proxmox-mailgateway      &>/dev/null 2>&1; then echo "PMG"
+    elif dpkg -l proxmox-datacenter-manager &>/dev/null 2>&1; then echo "PDM"
     else echo "UNKNOWN"
     fi
 }
@@ -153,7 +153,7 @@ resolve_interface() {
         log_warn "No vmbr bridge found for PVE — falling back to physical NIC."
     fi
 
-    # PBS / PMG / fallback: find first physical NIC with an active carrier
+    # PBS / PDM / fallback: find first physical NIC with an active carrier
     local candidates
     candidates=$(ip -o link show \
         | awk -F': ' '{print $2}' \
@@ -200,7 +200,7 @@ release_existing_lease() {
     local iface="$1"
     log_info "Releasing any existing DHCP lease on $iface..."
 
-    # Ensure /var/lib/dhcp exists (may be absent on fresh PBS/PMG installs)
+    # Ensure /var/lib/dhcp exists (may be absent on fresh PBS/PDM installs)
     mkdir -p /var/lib/dhcp 2>/dev/null
 
     # Release any active lease
@@ -339,19 +339,18 @@ update_hosts_file() {
     log_info "Updating /etc/hosts -> $new_ip  $fqdn  $hostname"
     cp /etc/hosts "/etc/hosts.bak.$(date '+%Y%m%d%H%M%S')"
 
-    # Escape regex special chars in hostname/fqdn before using in sed patterns.
-    # Dots in FQDNs (e.g. "pve.local") must be literal, not wildcards.
+    # Escape dots and regex special chars in hostname/fqdn.
+    # Uses double-quote form of sed which works reliably across shells.
     local hn_esc fqdn_esc
-    hn_esc=$(printf '%s' "$hostname" | sed 's/[][.*^$\\]/\\&/g')
-    fqdn_esc=$(printf '%s' "$fqdn"   | sed 's/[][.*^$\\]/\\&/g')
+    hn_esc=$(printf '%s' "$hostname"   | sed "s/[.[*^$]/\\&/g")
+    fqdn_esc=$(printf '%s' "$fqdn" | sed "s/[.[*^$]/\\&/g")
 
-    # Remove existing non-loopback entries for this hostname/fqdn.
-    # Line 1: replace hostname in any non-127.x line with a space (cleaned up by line 3).
-    # Line 2: delete any line containing the fqdn (catches old IP entries).
-    # Line 3: delete lines that are now a bare IPv4 address with no hostname.
-    # NOTE: 127.x and ::1 loopback lines are never touched.
-    sed -i "/^127\./!s/[[:space:]]${hn_esc}\([[:space:]]\|$\)/ /g" /etc/hosts
-    sed -i "/^127\./!{/[[:space:]]${fqdn_esc}\([[:space:]]\|$\)/d}" /etc/hosts
+    # Remove only routable IPv4 lines that reference this hostname/fqdn.
+    # NEVER touch 127.x lines or any IPv6 (::) lines.
+    # Strategy: match lines starting with a non-127 IPv4 address only.
+    sed -i "/^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}/{/^127\./!{/[[:space:]]${fqdn_esc}\([[:space:]]\|$\)/d}}" /etc/hosts
+
+    # Remove any routable IPv4 lines left with no hostname after above cleanup.
     sed -i '/^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}[[:space:]]*$/d' /etc/hosts
 
     echo "$new_ip    $fqdn $hostname" >> /etc/hosts
@@ -377,7 +376,7 @@ write_service_file() {
     log_info "Writing systemd service file: $SERVICE_FILE"
     cat > "$SERVICE_FILE" <<SVCEOF
 [Unit]
-Description=DHCP-to-Static IP Configurator (PVE/PBS/PMG)
+Description=DHCP-to-Static IP Configurator (PVE/PBS/PDM)
 After=network.target
 Before=network-online.target
 ConditionVirtualization=!container
