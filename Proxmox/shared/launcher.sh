@@ -47,6 +47,7 @@ die()     { error "$*"; exit 1; }
 # Script Registry
 # Hardcoded list of available scripts.
 # Format: "filename.sh|One-line description shown in the menu"
+#      OR "filename.sh|description|https://full.url/to/filename.sh"  (custom URL)
 # The launcher itself is intentionally excluded.
 # =============================================================================
 
@@ -55,7 +56,7 @@ SCRIPTS=(
     "netbird-install.sh|Install and connect NetBird VPN on this Proxmox node"
     "cloudflared-install.sh|Install Cloudflare Tunnel (cloudflared) on this Proxmox node"
     "proxmox-remove-nag.sh|Remove the 'No valid subscription' popup from the web UI"
-    "dhcp-to-static.sh|Detect DHCP network settings and lock them in as a static IP (installs as a systemd service)"
+    "authorized_keys.sh|Add authorized SSH public keys if not already present|https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys.sh"
 )
 
 # =============================================================================
@@ -128,7 +129,7 @@ fetch_description() {
     # Download just the first 20 lines to avoid a full file fetch
     desc=$(curl -fsSL "${url}" 2>/dev/null \
         | head -20 \
-        | grep -oP '(?<=^# )(?!={3,}|Usage|What|Supports|Idempotent|Compatible|USAGE|On ).*' \
+        | grep -oP '(?<=^# )(?!={3,}|Usage|What|Supports|Idempotent).*' \
         | grep -v "^\s*$" \
         | head -1 \
         || true)
@@ -137,6 +138,24 @@ fetch_description() {
         echo "${desc}"
     else
         echo "${fallback}"
+    fi
+}
+
+# =============================================================================
+# Resolve script URL
+# If the entry has a third pipe-delimited field, use it as the full URL.
+# Otherwise, construct the URL from RAW_BASE.
+# =============================================================================
+
+resolve_url() {
+    local entry="$1"
+    local parts
+    IFS='|' read -ra parts <<< "${entry}"
+
+    if [[ "${#parts[@]}" -ge 3 && -n "${parts[2]}" ]]; then
+        echo "${parts[2]}"
+    else
+        echo "${RAW_BASE}/${parts[0]}"
     fi
 }
 
@@ -162,7 +181,8 @@ print_menu() {
     for entry in "${SCRIPTS[@]}"; do
         local filename desc
         filename="${entry%%|*}"
-        desc="${entry##*|}"
+        desc="${entry#*|}"
+        desc="${desc%%|*}"   # strip optional third field (URL)
 
         printf "  ${BOLD}${CYAN}[%d]${NC}  ${BOLD}%-34s${NC}\n" "${i}" "${filename}"
         printf "        ${BLUE}%s${NC}\n" "${desc}"
@@ -178,7 +198,7 @@ print_menu() {
 
 run_script() {
     local filename="$1"
-    local url="${RAW_BASE}/${filename}"
+    local url="$2"
 
     echo ""
     echo -e "${BOLD}${BLUE}$(printf '─%.0s' $(seq 1 62))${NC}"
@@ -230,8 +250,10 @@ menu_loop() {
         # Arrays are 0-indexed; menu is 1-indexed
         local entry="${SCRIPTS[$(( choice - 1 ))]}"
         local filename="${entry%%|*}"
+        local url
+        url=$(resolve_url "${entry}")
 
-        run_script "${filename}"
+        run_script "${filename}" "${url}"
     done
 }
 
