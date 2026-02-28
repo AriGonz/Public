@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.02"
+SCRIPT_VERSION="0.03"
 SCRIPT_NAME="launcher.sh"
 RAW_BASE="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/Proxmox/shared"
 SELF_URL="${RAW_BASE}/${SCRIPT_NAME}"
@@ -56,6 +56,7 @@ SCRIPTS=(
     "netbird-install.sh|Install and connect NetBird VPN on this Proxmox node"
     "cloudflared-install.sh|Install Cloudflare Tunnel (cloudflared) on this Proxmox node"
     "proxmox-remove-nag.sh|Remove the 'No valid subscription' popup from the web UI"
+    "dhcp-to-static.sh|Convert a DHCP network interface to a static IP configuration"
     "authorized_keys.sh|Add authorized SSH public keys if not already present|https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/authorized_keys.sh"
 )
 
