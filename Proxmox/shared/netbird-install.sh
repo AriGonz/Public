@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.02"
+SCRIPT_VERSION="0.03"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -222,30 +222,17 @@ connect_with_device_auth() {
     step "Generating NetBird device-auth link..."
 
     info "Running: netbird up (device auth flow — no setup key)"
-    info "This will print a URL and a short code. Copy them for the recap file."
+    info "A URL and code will appear below. Open the URL in a browser to authenticate."
+    info "The script will continue automatically once auth is complete."
     echo ""
 
-    # Run netbird up in the background, capture its output, and extract the
-    # device-auth URL + code.  NetBird prints something like:
-    #   Please open the following URL in your browser and complete the OAuth2 flow:
-    #   https://netbird.arigonz.com/oauth2/device  XXXX-XXXX
-    # We capture that, then write the instructions file.
+    # Run netbird up directly (NOT in a subshell) so the URL prints live to
+    # the terminal and the process can complete the auth handshake.
+    # Capturing via $(...) would deadlock — the URL never shows, auth never
+    # completes, and netbird up never exits.
+    netbird up || warn "netbird up returned a non-zero exit code — check 'netbird status'."
 
-    local nb_output
-    nb_output=$(netbird up 2>&1 || true)
-
-    echo "${nb_output}"
-
-    # Extract the URL line (looks for the management/oauth URL pattern)
-    local auth_url auth_code
-    auth_url=$(echo "${nb_output}" | grep -oP 'https?://\S+/oauth2/device\s+\S+' | head -1 || true)
-
-    if [[ -z "${auth_url}" ]]; then
-        # Fallback: grab any https line that looks device-auth related
-        auth_url=$(echo "${nb_output}" | grep -oP 'https?://\S+' | head -1 || true)
-    fi
-
-    write_device_auth_instructions "${auth_url}"
+    write_device_auth_instructions "<completed via browser — run 'netbird status' to confirm>"
 }
 
 write_device_auth_instructions() {
