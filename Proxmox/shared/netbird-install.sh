@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.01"
+SCRIPT_VERSION="0.02"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -182,7 +182,9 @@ prompt_setup_key() {
 
     local answer
     while true; do
-        read -rp "  Your choice [y/n]: " answer
+        # Read from /dev/tty explicitly so this works when stdin is a pipe
+        # (e.g. when the script is fetched and run via: bash -c "$(curl ...)")
+        read -rp "  Your choice [y/n]: " answer </dev/tty
         case "${answer,,}" in
             y|yes) return 0 ;;
             n|no)  return 1 ;;
@@ -197,7 +199,8 @@ connect_with_setup_key() {
 
     local setup_key
     while true; do
-        read -rp "  Enter your setup key: " setup_key
+        # Read from /dev/tty explicitly so this works when stdin is a pipe
+        read -rp "  Enter your setup key: " setup_key </dev/tty
         setup_key="${setup_key// /}"   # strip accidental spaces
         if [[ -n "${setup_key}" ]]; then
             break
