@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="0.03"
+SCRIPT_VERSION="0.04"
 
 # =============================================================================
 # Colors & Output Helpers
@@ -50,6 +50,9 @@ PRODUCT=""              # pve | pbs | pdm
 NETBIRD_WAS_INSTALLED=false
 SETUP_KEY_USED=false
 DEVICE_AUTH_FILE="/root/netbird-setup.txt"
+
+# Self-hosted NetBird management server
+NETBIRD_SERVER="netbird.arigonz.com"
 
 # =============================================================================
 # Preflight
@@ -209,7 +212,7 @@ connect_with_setup_key() {
     done
 
     info "Running: netbird up --setup-key <redacted>"
-    if netbird up --setup-key "${setup_key}"; then
+    if netbird up --management-url "https://${NETBIRD_SERVER}" --setup-key "${setup_key}"; then
         SETUP_KEY_USED=true
         success "NetBird connected successfully using setup key."
     else
@@ -230,7 +233,7 @@ connect_with_device_auth() {
     # the terminal and the process can complete the auth handshake.
     # Capturing via $(...) would deadlock — the URL never shows, auth never
     # completes, and netbird up never exits.
-    netbird up || warn "netbird up returned a non-zero exit code — check 'netbird status'."
+    netbird up --management-url "https://${NETBIRD_SERVER}" || warn "netbird up returned a non-zero exit code — check 'netbird status'."
 
     write_device_auth_instructions "<completed via browser — run 'netbird status' to confirm>"
 }
