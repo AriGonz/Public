@@ -1,11 +1,14 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.02
+# Proxmox Backup Server Portable Setup Script v0.03
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
 # Run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh)"
 # =============================================================================
+
+# FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
+set -o pipefail
 
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
@@ -24,28 +27,28 @@ RECAP_MOTD="-" RECAP_MDNS="-" RECAP_NAG="-" RECAP_NETWORK="-"
 RECAP_SSH_KEYS="-" RECAP_GUESTAGENT="-"
 
 success() { echo -e "\e[32m[✔] $1\e[0m"; }
-warn() { echo -e "\e[33m[⚠] $1\e[0m"; }
-error() { echo -e "\e[31m[✖] $1\e[0m"; exit 1; }
-info() { echo -e "\e[34m[i] $1\e[0m"; }
+warn()    { echo -e "\e[33m[⚠] $1\e[0m"; }
+error()   { echo -e "\e[31m[✖] $1\e[0m"; exit 1; }
+info()    { echo -e "\e[34m[i] $1\e[0m"; }
 
 print_recap_box() {
     echo
     echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
-    echo -e "\e[34m║               PBS PORTABLE SETUP RECAP (v0.02)               ║\e[0m"
+    echo -e "\e[34m║               PBS PORTABLE SETUP RECAP (v0.03)               ║\e[0m"
     echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Hostname:" "$RECAP_HOSTNAME"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Domain:" "$RECAP_DOMAIN"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "SSH Keys:" "$RECAP_SSH_KEYS"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Repos:" "$RECAP_REPOS"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Upgrade:" "$RECAP_UPGRADE"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Guest Agent:" "$RECAP_GUESTAGENT"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Netbird:" "$RECAP_NETBIRD"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Cloudflared:" "$RECAP_CLOUDFLARED"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Firewall:" "$RECAP_FIREWALL"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "mDNS:" "$RECAP_MDNS"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Hostname:"     "$RECAP_HOSTNAME"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Domain:"       "$RECAP_DOMAIN"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "SSH Keys:"     "$RECAP_SSH_KEYS"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Repos:"        "$RECAP_REPOS"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Upgrade:"      "$RECAP_UPGRADE"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Guest Agent:"  "$RECAP_GUESTAGENT"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Netbird:"      "$RECAP_NETBIRD"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Cloudflared:"  "$RECAP_CLOUDFLARED"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Firewall:"     "$RECAP_FIREWALL"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "mDNS:"         "$RECAP_MDNS"
     printf "\e[34m║  %-20s  %s\e[0m\n" "MOTD/Console:" "$RECAP_MOTD"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Nag Removal:" "$RECAP_NAG"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Networking:" "$RECAP_NETWORK"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Nag Removal:"  "$RECAP_NAG"
+    printf "\e[34m║  %-20s  %s\e[0m\n" "Networking:"   "$RECAP_NETWORK"
     echo -e "\e[34m╚══════════════════════════════════════════════════════════════╝\e[0m"
 }
 
@@ -118,7 +121,10 @@ for key in "${SSH_KEYS[@]}"; do
     grep -qF "$key" /root/.ssh/authorized_keys 2>/dev/null || echo "$key" >> /root/.ssh/authorized_keys
 done
 chmod 600 /root/.ssh/authorized_keys 2>/dev/null || true
-echo 'alias ll="ls -lrt"' >> /root/.bashrc 2>/dev/null || true
+
+# FIX: guard against duplicate alias on re-run
+grep -qF 'alias ll=' /root/.bashrc || echo 'alias ll="ls -lrt"' >> /root/.bashrc
+
 RECAP_SSH_KEYS="✔ ${#SSH_KEYS[@]} key(s) added"
 
 # =============================================================================
@@ -127,9 +133,12 @@ RECAP_SSH_KEYS="✔ ${#SSH_KEYS[@]} key(s) added"
 info "Phase 1: Hostname & Domain"
 DETECTED_HOST="" DETECTED_DOMAIN=""
 while read -r line; do
-    if [[ $line =~ ^[0-9] && $line == *.* && $line != 127* && $line != ::* ]]; then
-        DETECTED_HOST=$(echo "$line" | awk '{print $2}' | cut -d. -f1)
-        DETECTED_DOMAIN=$(echo "$line" | awk '{print $2}' | cut -d. -f2-)
+    # FIX: check for dot in the hostname field (column 2), not the whole line
+    FQDN=$(echo "$line" | awk '{print $2}')
+    IP=$(echo "$line" | awk '{print $1}')
+    if [[ "$IP" =~ ^[0-9] && "$IP" != 127.* && "$FQDN" == *.* ]]; then
+        DETECTED_HOST=$(echo "$FQDN" | cut -d. -f1)
+        DETECTED_DOMAIN=$(echo "$FQDN" | cut -d. -f2-)
         break
     fi
 done < /etc/hosts
@@ -159,6 +168,7 @@ RECAP_DOMAIN="✔ $USER_DOMAIN"
 # PHASE 2 — Upgrade + tools
 # =============================================================================
 info "Phase 2: Upgrade + tools"
+# FIX: avahi-daemon included here only (removed duplicate install in Phase 5)
 apt-get full-upgrade -y && apt-get autoremove -y
 apt-get install -y htop curl git jq wget ufw avahi-daemon
 RECAP_UPGRADE="✔ Packages upgraded"
@@ -185,7 +195,13 @@ NETBIRD_SKIP_INSTALL=false
 
 if $NETBIRD_CONNECTED; then
     read -p "Re-authorize Netbird? (y/N) " -n1 -r; echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then netbird down; NETBIRD_DO_SETUP=true; NETBIRD_SKIP_INSTALL=true; else RECAP_NETBIRD="✔ Already connected ($NETBIRD_IP)"; fi
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        netbird down
+        NETBIRD_DO_SETUP=true
+        NETBIRD_SKIP_INSTALL=true
+    else
+        RECAP_NETBIRD="✔ Already connected ($NETBIRD_IP)"
+    fi
 elif command -v netbird >/dev/null 2>&1; then
     NETBIRD_DO_SETUP=true; NETBIRD_SKIP_INSTALL=true
 else
@@ -193,7 +209,9 @@ else
 fi
 
 if $NETBIRD_DO_SETUP; then
-    if ! $NETBIRD_SKIP_INSTALL; then curl -fsSL https://pkgs.netbird.io/install.sh | sh; fi
+    if ! $NETBIRD_SKIP_INSTALL; then
+        curl -fsSL https://pkgs.netbird.io/install.sh | sh
+    fi
     netbird up --management-url "$NETBIRD_URL" > /tmp/netbird.log 2>&1 &
     sleep 8
     AUTH_URL=$(grep -o 'https://[^ ]*netbird[^ ]*' /tmp/netbird.log | head -1)
@@ -209,8 +227,9 @@ if $NETBIRD_DO_SETUP; then
     done
 
     if ! $NETBIRD_CONNECTED; then
-        while true; do
-            read -p "Have you authorized in the browser? (y/n) " -n1 -r; echo
+        # FIX: bounded loop (max 5 attempts) instead of infinite while true
+        for attempt in {1..5}; do
+            read -p "Have you authorized in the browser? [attempt $attempt/5] (y/n) " -n1 -r; echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 sleep 10
                 if netbird status | grep -q Connected; then
@@ -218,11 +237,15 @@ if $NETBIRD_DO_SETUP; then
                     NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
                     break
                 fi
+                warn "Still not connected..."
             else
                 RECAP_NETBIRD="⚠ Not authorized — skipping"
                 break
             fi
         done
+        if ! $NETBIRD_CONNECTED && [[ "$RECAP_NETBIRD" == "-" ]]; then
+            RECAP_NETBIRD="⚠ Max attempts reached — skipping"
+        fi
     fi
     [[ $NETBIRD_CONNECTED == true ]] && RECAP_NETBIRD="✔ Connected (${NETBIRD_IP})"
 fi
@@ -273,12 +296,22 @@ for br in vmbr{0..3}; do
     SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_network('$IP/24', strict=False))" 2>/dev/null || echo "${IP%.*}.0/24")
     [[ $SUBNET != 100.64* ]] && SUBNETS+=("$SUBNET")
 done
+
+# FIX: collect rule numbers first, then delete in reverse order to avoid
+# index shifting mid-loop (deleting rule [3] makes [4] become [3], etc.)
 for port in 22 $PBS_PORT; do
-    ufw status numbered | grep -E "$port" | grep -v Netbird | while read -r line; do
-        num=$(echo "$line" | grep -oP '^\[[0-9]+\]' | tr -d '[]')
-        [[ -n $num ]] && echo y | ufw delete $num >> $LOG 2>&1
+    mapfile -t rule_nums < <(
+        ufw status numbered \
+        | grep -E "^\[[0-9]+\].*$port" \
+        | grep -v "Netbird" \
+        | grep -oP '^\[[0-9]+\]' \
+        | tr -d '[]'
+    )
+    for num in $(printf '%s\n' "${rule_nums[@]}" | sort -rn); do
+        [[ -n $num ]] && echo y | ufw delete "$num" >> $LOG 2>&1
     done
 done
+
 for s in "${SUBNETS[@]}"; do
     ufw allow from "$s" to any port 22 comment "LAN SSH" >> $LOG 2>&1
     ufw allow from "$s" to any port $PBS_PORT comment "LAN PBS" >> $LOG 2>&1
@@ -300,29 +333,28 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload && systemctl enable --now ufw-lan-refresh.service
 
-# mDNS
-apt-get install -y avahi-daemon
+# mDNS — FIX: no duplicate apt-get install (avahi already installed in Phase 2)
 sed -i 's/#enable-reflector=yes/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf
 sed -i '/allow-interfaces/d; /deny-interfaces/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
-echo "use-ipv6=no" >> /etc/avahi/avahi-daemon.conf 2>/dev/null || true
+grep -q "^use-ipv6=no" /etc/avahi/avahi-daemon.conf || echo "use-ipv6=no" >> /etc/avahi/avahi-daemon.conf
 systemctl enable --now avahi-daemon
 RECAP_MDNS="✔ ${NEWHOST}.local:$PBS_PORT"
 
-# MOTD
+# MOTD — FIX: reduced curl timeouts from 2s to 1s to keep SSH login snappy
 cat > /etc/update-motd.d/99-portable-pbs <<'MOTD'
 #!/bin/bash
 . /etc/proxmox-portable/config 2>/dev/null || true
 : ${DOMAIN:=local} ${PBS_PORT:=8007} ${HOSTNAME:=pbs}
 echo "=== Proxmox Backup Server — $HOSTNAME ==="
-echo "Hostname   : https://$HOSTNAME:$PBS_PORT $(curl -sk --max-time 2 https://$HOSTNAME:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
+echo "Hostname   : https://$HOSTNAME:$PBS_PORT $(curl -sk --max-time 1 https://$HOSTNAME:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 echo "DHCP IPs:"
 for br in vmbr{0..3}; do
     IP=$(ip -4 addr show $br 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+')
-    [[ -n $IP ]] && echo "  $br : https://$IP:$PBS_PORT $(curl -sk --max-time 2 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
+    [[ -n $IP ]] && echo "  $br : https://$IP:$PBS_PORT $(curl -sk --max-time 1 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 done
 NB_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1)
-echo "Netbird    : ${NB_IP:-Disconnected} $([[ -n $NB_IP ]] && curl -sk --max-time 2 https://$NB_IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "")"
-echo "mDNS       : https://$HOSTNAME.local:$PBS_PORT $(curl -sk --max-time 2 https://$HOSTNAME.local:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
+echo "Netbird    : ${NB_IP:-Disconnected} $([[ -n $NB_IP ]] && curl -sk --max-time 1 https://$NB_IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "")"
+echo "mDNS       : https://$HOSTNAME.local:$PBS_PORT $(curl -sk --max-time 1 https://$HOSTNAME.local:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 CF_ACTIVE=false
 for p in 2000 20241 2001 8080; do
     ss -tlnp 2>/dev/null | grep -q ":$p" || pgrep -f cloudflared >/dev/null && CF_ACTIVE=true && break
@@ -391,15 +423,25 @@ systemctl daemon-reload && systemctl enable --now netbird-tty-refresh.service
 # PHASE 6 — Nag Removal
 # =============================================================================
 info "Phase 6: Subscription nag removal"
+# FIX: initialize to empty so the "not found" fallback check works correctly
+RECAP_NAG=""
 for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
     [[ -f "$JS" ]] || continue
     cp "$JS" "${JS}.bak.$(date +%s)"
     sed -Ezi 's/(Ext\.Msg\.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS"
-    systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
-    RECAP_NAG="✔ Patched"
+    # FIX: verify the patch actually landed — sed exits 0 even if pattern unmatched
+    if grep -q 'void({' "$JS"; then
+        systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
+        RECAP_NAG="✔ Patched"
+    else
+        # Restore backup since patch didn't apply
+        cp "${JS}.bak."* "$JS" 2>/dev/null || true
+        RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
+    fi
     break
 done
-[[ -z $RECAP_NAG ]] && RECAP_NAG="⚠ JS file not found"
+# FIX: RECAP_NAG was initialized to "-" before, so [[ -z ]] never fired
+[[ -z "$RECAP_NAG" ]] && RECAP_NAG="⚠ JS file not found"
 
 # =============================================================================
 # PHASE 7 — Networking (VM-safe)
