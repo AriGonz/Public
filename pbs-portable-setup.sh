@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.04
+# Proxmox Backup Server Portable Setup Script v0.05
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,6 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
+SCRIPT_VERSION="v0.05"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -34,7 +35,7 @@ info()    { echo -e "\e[34m[i] $1\e[0m"; }
 print_recap_box() {
     echo
     echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
-    echo -e "\e[34m║               PBS PORTABLE SETUP RECAP (v0.04)               ║\e[0m"
+    printf  "\e[34m║               PBS PORTABLE SETUP RECAP (%-6s)               ║\e[0m\n" "$SCRIPT_VERSION"
     echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Hostname:"     "$RECAP_HOSTNAME"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Domain:"       "$RECAP_DOMAIN"
@@ -51,6 +52,16 @@ print_recap_box() {
     printf "\e[34m║  %-20s  %s\e[0m\n" "Networking:"   "$RECAP_NETWORK"
     echo -e "\e[34m╚══════════════════════════════════════════════════════════════╝\e[0m"
 }
+
+# =============================================================================
+# BANNER
+# =============================================================================
+echo
+echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
+echo -e "\e[34m║         Proxmox Backup Server — Portable Setup               ║\e[0m"
+printf  "\e[34m║                    %-10s                               ║\e[0m\n" "$SCRIPT_VERSION"
+echo -e "\e[34m╚══════════════════════════════════════════════════════════════╝\e[0m"
+echo
 
 # =============================================================================
 # PRE-CHECKS
@@ -89,13 +100,18 @@ if ! grep -q "pbs-no-subscription" /etc/apt/sources.list* 2>/dev/null; then
     echo "deb http://download.proxmox.com/debian/pbs $CODENAME pbs-no-subscription" >> /etc/apt/sources.list
 fi
 
-if ! grep -q deb.debian.org /etc/apt/sources.list* 2>/dev/null; then
+# Only add Debian repos if neither .list nor modern .sources format already has them
+DEBIAN_IN_LIST=$(grep -qs "deb.debian.org" /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null && echo yes || echo no)
+DEBIAN_IN_SOURCES=$(grep -rqs "deb.debian.org" /etc/apt/sources.list.d/*.sources 2>/dev/null && echo yes || echo no)
+if [[ "$DEBIAN_IN_LIST" == "no" && "$DEBIAN_IN_SOURCES" == "no" ]]; then
     cat <<EOF >> /etc/apt/sources.list
 
 deb http://deb.debian.org/debian $CODENAME main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian $CODENAME-updates main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security $CODENAME-security main contrib non-free non-free-firmware
 EOF
+elif [[ "$DEBIAN_IN_SOURCES" == "yes" ]]; then
+    info "Debian repos already present in .sources format — skipping legacy deb lines"
 fi
 
 apt-get update -qq
@@ -237,31 +253,52 @@ if $NETBIRD_DO_SETUP; then
     read -p "  Setup Key: " NETBIRD_SETUP_KEY
     echo
 
+    # Helper: launch browser auth flow and display the auth URL/code
+    _netbird_browser_auth() {
+        info "Starting browser auth flow..."
+        netbird up --management-url "$NETBIRD_URL" > /tmp/netbird.log 2>&1 &
+        sleep 8
+        # Try to extract a device-flow URL (contains a user code to enter)
+        AUTH_URL=$(grep -o 'https://[^ ]*' /tmp/netbird.log | grep -E 'auth|device|login|activate' | head -1)
+        USER_CODE=$(grep -oP '(?i)code[[:space:]]*:[[:space:]]*\K[A-Z0-9]{4,}' /tmp/netbird.log | head -1)
+        echo
+        echo -e "  \e[1;33m┌──────────────────────────────────────────────────────────────┐\e[0m"
+        echo -e "  \e[1;33m│         NETBIRD BROWSER AUTHORIZATION REQUIRED               │\e[0m"
+        echo -e "  \e[1;33m├──────────────────────────────────────────────────────────────┤\e[0m"
+        if [[ -n "$AUTH_URL" ]]; then
+            echo -e "  \e[1;33m│  1. Open this URL in your browser:                           │\e[0m"
+            echo -e "  \e[1;33m│     $AUTH_URL\e[0m"
+        else
+            echo -e "  \e[1;33m│  1. Visit your Netbird dashboard:                            │\e[0m"
+            echo -e "  \e[1;33m│     ${NETBIRD_URL}\e[0m"
+        fi
+        if [[ -n "$USER_CODE" ]]; then
+            echo -e "  \e[1;33m│                                                              │\e[0m"
+            echo -e "  \e[1;33m│  2. Enter this code when prompted:                           │\e[0m"
+            echo -e "  \e[1;33m│     \e[1;97m$USER_CODE\e[1;33m                                                   │\e[0m"
+        fi
+        echo -e "  \e[1;33m│                                                              │\e[0m"
+        echo -e "  \e[1;33m│  3. Log in and click Authorize — then return here.           │\e[0m"
+        echo -e "  \e[1;33m└──────────────────────────────────────────────────────────────┘\e[0m"
+        echo
+    }
+
     if [[ -n "$NETBIRD_SETUP_KEY" ]]; then
-        # Key-based auth — non-interactive, no browser needed
+        # Key-based auth — non-interactive
         info "Using setup key to authenticate..."
         netbird up --management-url "$NETBIRD_URL" --setup-key "$NETBIRD_SETUP_KEY" > /tmp/netbird.log 2>&1
         sleep 5
-    else
-        # Browser-based auth — launch in background and show the auth URL
-        info "No setup key provided — starting browser auth flow..."
-        netbird up --management-url "$NETBIRD_URL" > /tmp/netbird.log 2>&1 &
-        sleep 8
-        AUTH_URL=$(grep -o 'https://[^ ]*' /tmp/netbird.log | grep -E 'auth|device|login|netbird' | head -1)
-        if [[ -n "$AUTH_URL" ]]; then
-            echo
-            echo -e "  \e[1;33m┌─────────────────────────────────────────────────────────┐\e[0m"
-            echo -e "  \e[1;33m│  Open this URL in your browser to authorize this node:  │\e[0m"
-            echo -e "  \e[1;33m│                                                         │\e[0m"
-            echo -e "  \e[1;33m│  $AUTH_URL\e[0m"
-            echo -e "  \e[1;33m│                                                         │\e[0m"
-            echo -e "  \e[1;33m│  You may be asked to enter a code shown on screen.      │\e[0m"
-            echo -e "  \e[1;33m└─────────────────────────────────────────────────────────┘\e[0m"
-            echo
-        else
-            warn "Could not extract auth URL from netbird output."
-            info "  → Manually visit: \e[1;33m${NETBIRD_URL}\e[0m to authorize this node."
+        # Check if key auth worked before deciding to fall back
+        if ! netbird status 2>/dev/null | grep -q Connected; then
+            warn "Setup key did not connect — falling back to browser auth."
+            info "  → You can generate a valid key at: \e[1;33m${NETBIRD_URL}/peers\e[0m"
+            netbird down 2>/dev/null || true
+            _netbird_browser_auth
+            NETBIRD_SETUP_KEY=""  # clear so browser confirmation loop runs below
         fi
+    else
+        # Browser-based auth from the start
+        _netbird_browser_auth
     fi
 
     # --- Wait for connection ---
