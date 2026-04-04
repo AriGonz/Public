@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.03
+# Proxmox Backup Server Portable Setup Script v0.04
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -23,7 +23,7 @@ PBS_PORT=8007
 # RECAP TRACKING
 RECAP_HOSTNAME="-" RECAP_DOMAIN="-" RECAP_REPOS="-" RECAP_UPGRADE="-"
 RECAP_NETBIRD="-" RECAP_CLOUDFLARED="-" RECAP_FIREWALL="-"
-RECAP_MOTD="-" RECAP_MDNS="-" RECAP_NAG="-" RECAP_NETWORK="-"
+RECAP_MOTD="-" RECAP_MDNS="-" RECAP_NAG="" RECAP_NETWORK="-"
 RECAP_SSH_KEYS="-" RECAP_GUESTAGENT="-"
 
 success() { echo -e "\e[32m[✔] $1\e[0m"; }
@@ -34,7 +34,7 @@ info()    { echo -e "\e[34m[i] $1\e[0m"; }
 print_recap_box() {
     echo
     echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
-    echo -e "\e[34m║               PBS PORTABLE SETUP RECAP (v0.03)               ║\e[0m"
+    echo -e "\e[34m║               PBS PORTABLE SETUP RECAP (v0.04)               ║\e[0m"
     echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Hostname:"     "$RECAP_HOSTNAME"
     printf "\e[34m║  %-20s  %s\e[0m\n" "Domain:"       "$RECAP_DOMAIN"
@@ -133,7 +133,9 @@ RECAP_SSH_KEYS="✔ ${#SSH_KEYS[@]} key(s) added"
 info "Phase 1: Hostname & Domain"
 DETECTED_HOST="" DETECTED_DOMAIN=""
 while read -r line; do
-    # FIX: check for dot in the hostname field (column 2), not the whole line
+    # Skip comment and blank lines
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${line// }" ]] && continue
     FQDN=$(echo "$line" | awk '{print $2}')
     IP=$(echo "$line" | awk '{print $1}')
     if [[ "$IP" =~ ^[0-9] && "$IP" != 127.* && "$FQDN" == *.* ]]; then
@@ -177,13 +179,28 @@ RECAP_UPGRADE="✔ Packages upgraded"
 # PHASE 2.5 — QEMU Guest Agent (VM-specific)
 # =============================================================================
 info "Phase 2.5: QEMU Guest Agent"
-read -p "Install QEMU Guest Agent (recommended for VM)? (y/N) " -n1 -r; echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    apt-get install -y qemu-guest-agent
+
+QEMU_PKG_OK=false
+QEMU_SVC_OK=false
+dpkg -l qemu-guest-agent 2>/dev/null | grep -q '^ii' && QEMU_PKG_OK=true
+systemctl is-active --quiet qemu-guest-agent 2>/dev/null && QEMU_SVC_OK=true
+
+if $QEMU_PKG_OK && $QEMU_SVC_OK; then
+    success "QEMU Guest Agent already installed and running — skipping"
+    RECAP_GUESTAGENT="✔ Already installed & active"
+elif $QEMU_PKG_OK && ! $QEMU_SVC_OK; then
+    warn "QEMU Guest Agent installed but not running — enabling now"
     systemctl enable --now qemu-guest-agent
-    RECAP_GUESTAGENT="✔ Installed & enabled"
+    RECAP_GUESTAGENT="✔ Was installed, service now enabled"
 else
-    RECAP_GUESTAGENT="⚠ Skipped by user"
+    read -p "Install QEMU Guest Agent (recommended for VM)? (y/N) " -n1 -r; echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        apt-get install -y qemu-guest-agent
+        systemctl enable --now qemu-guest-agent
+        RECAP_GUESTAGENT="✔ Installed & enabled"
+    else
+        RECAP_GUESTAGENT="⚠ Skipped by user"
+    fi
 fi
 
 # =============================================================================
@@ -212,29 +229,65 @@ if $NETBIRD_DO_SETUP; then
     if ! $NETBIRD_SKIP_INSTALL; then
         curl -fsSL https://pkgs.netbird.io/install.sh | sh
     fi
-    netbird up --management-url "$NETBIRD_URL" > /tmp/netbird.log 2>&1 &
-    sleep 8
-    AUTH_URL=$(grep -o 'https://[^ ]*netbird[^ ]*' /tmp/netbird.log | head -1)
-    [[ -n $AUTH_URL ]] && info "→ Authorize here: \e[1;33m$AUTH_URL\e[0m" || warn "Check https://$NETBIRD_URL"
 
-    for i in {1..10}; do
-        sleep 1
-        if netbird status | grep -q Connected; then
+    # --- Setup Key prompt ---
+    echo
+    info "Netbird Setup Key (leave blank to use browser auth instead):"
+    info "  → Get a setup key at: \e[1;33m${NETBIRD_URL}/peers\e[0m"
+    read -p "  Setup Key: " NETBIRD_SETUP_KEY
+    echo
+
+    if [[ -n "$NETBIRD_SETUP_KEY" ]]; then
+        # Key-based auth — non-interactive, no browser needed
+        info "Using setup key to authenticate..."
+        netbird up --management-url "$NETBIRD_URL" --setup-key "$NETBIRD_SETUP_KEY" > /tmp/netbird.log 2>&1
+        sleep 5
+    else
+        # Browser-based auth — launch in background and show the auth URL
+        info "No setup key provided — starting browser auth flow..."
+        netbird up --management-url "$NETBIRD_URL" > /tmp/netbird.log 2>&1 &
+        sleep 8
+        AUTH_URL=$(grep -o 'https://[^ ]*' /tmp/netbird.log | grep -E 'auth|device|login|netbird' | head -1)
+        if [[ -n "$AUTH_URL" ]]; then
+            echo
+            echo -e "  \e[1;33m┌─────────────────────────────────────────────────────────┐\e[0m"
+            echo -e "  \e[1;33m│  Open this URL in your browser to authorize this node:  │\e[0m"
+            echo -e "  \e[1;33m│                                                         │\e[0m"
+            echo -e "  \e[1;33m│  $AUTH_URL\e[0m"
+            echo -e "  \e[1;33m│                                                         │\e[0m"
+            echo -e "  \e[1;33m│  You may be asked to enter a code shown on screen.      │\e[0m"
+            echo -e "  \e[1;33m└─────────────────────────────────────────────────────────┘\e[0m"
+            echo
+        else
+            warn "Could not extract auth URL from netbird output."
+            info "  → Manually visit: \e[1;33m${NETBIRD_URL}\e[0m to authorize this node."
+        fi
+    fi
+
+    # --- Wait for connection ---
+    info "Waiting for Netbird to connect..."
+    for i in {1..15}; do
+        sleep 2
+        if netbird status 2>/dev/null | grep -q Connected; then
             NETBIRD_CONNECTED=true
             NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+            success "Netbird connected! ($NETBIRD_IP)"
             break
         fi
+        echo -n "."
     done
+    echo
 
-    if ! $NETBIRD_CONNECTED; then
-        # FIX: bounded loop (max 5 attempts) instead of infinite while true
+    # --- If still not connected, prompt user to confirm browser auth ---
+    if ! $NETBIRD_CONNECTED && [[ -z "$NETBIRD_SETUP_KEY" ]]; then
         for attempt in {1..5}; do
-            read -p "Have you authorized in the browser? [attempt $attempt/5] (y/n) " -n1 -r; echo
+            read -p "Have you completed browser authorization? [attempt $attempt/5] (y/n) " -n1 -r; echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 sleep 10
-                if netbird status | grep -q Connected; then
+                if netbird status 2>/dev/null | grep -q Connected; then
                     NETBIRD_CONNECTED=true
                     NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+                    success "Netbird connected! ($NETBIRD_IP)"
                     break
                 fi
                 warn "Still not connected..."
@@ -246,7 +299,12 @@ if $NETBIRD_DO_SETUP; then
         if ! $NETBIRD_CONNECTED && [[ "$RECAP_NETBIRD" == "-" ]]; then
             RECAP_NETBIRD="⚠ Max attempts reached — skipping"
         fi
+    elif ! $NETBIRD_CONNECTED && [[ -n "$NETBIRD_SETUP_KEY" ]]; then
+        warn "Setup key auth did not result in a connection. Key may be invalid or expired."
+        info "  → Check your keys at: \e[1;33m${NETBIRD_URL}/peers\e[0m"
+        RECAP_NETBIRD="⚠ Setup key auth failed — check key at ${NETBIRD_URL}/peers"
     fi
+
     [[ $NETBIRD_CONNECTED == true ]] && RECAP_NETBIRD="✔ Connected (${NETBIRD_IP})"
 fi
 
@@ -356,9 +414,11 @@ NB_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+' | c
 echo "Netbird    : ${NB_IP:-Disconnected} $([[ -n $NB_IP ]] && curl -sk --max-time 1 https://$NB_IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "")"
 echo "mDNS       : https://$HOSTNAME.local:$PBS_PORT $(curl -sk --max-time 1 https://$HOSTNAME.local:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 CF_ACTIVE=false
-for p in 2000 20241 2001 8080; do
-    ss -tlnp 2>/dev/null | grep -q ":$p" || pgrep -f cloudflared >/dev/null && CF_ACTIVE=true && break
-done
+if pgrep -f cloudflared >/dev/null 2>&1; then
+    for p in 2000 20241 2001 8080; do
+        ss -tlnp 2>/dev/null | grep -q ":$p" && CF_ACTIVE=true && break
+    done
+fi
 echo "Cloudflared: https://$HOSTNAME.$DOMAIN $([[ $CF_ACTIVE == true ]] && echo "(Active)" || echo "(Not active)")"
 MOTD
 chmod +x /etc/update-motd.d/99-portable-pbs
@@ -434,8 +494,9 @@ for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js /usr/share/
         systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
         RECAP_NAG="✔ Patched"
     else
-        # Restore backup since patch didn't apply
-        cp "${JS}.bak."* "$JS" 2>/dev/null || true
+        # Restore backup since patch didn't apply — use the most recent backup
+        LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
+        [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
         RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
     fi
     break
