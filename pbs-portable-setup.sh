@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.07
+# Proxmox Backup Server Portable Setup Script v0.09
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.07"
+SCRIPT_VERSION="v0.09"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -90,10 +90,22 @@ info "Phase 0: Repository setup"
 rm -f /etc/apt/sources.list.d/*.bak* 2>/dev/null || true
 CODENAME=$(grep -oP 'VERSION_CODENAME=\K\w+' /etc/os-release || echo bookworm)
 
-for f in /etc/apt/sources.list.d/pbs-enterprise.*; do
+# Disable ALL enterprise Proxmox repos (pbs-enterprise and any others)
+for f in /etc/apt/sources.list.d/*enterprise* /etc/apt/sources.list.d/*proxmox*; do
     [[ -f "$f" ]] || continue
-    if [[ "$f" == *.list ]]; then sed -i 's/^deb /#deb /g' "$f"
-    else sed -i 's/Enabled: yes/Enabled: no/g' "$f"; fi
+    if [[ "$f" == *.list ]]; then
+        sed -i 's/^deb /#deb /g' "$f"
+        info "Disabled enterprise repo (list): $f"
+    elif [[ "$f" == *.sources ]]; then
+        # Handle both "Enabled: yes" and "Enabled: true" and missing Enabled line
+        if grep -q "^Enabled:" "$f"; then
+            sed -i 's/^Enabled:.*/Enabled: no/g' "$f"
+        else
+            # Prepend Enabled: no if key is absent
+            sed -i '1s/^/Enabled: no\n/' "$f"
+        fi
+        info "Disabled enterprise repo (sources): $f"
+    fi
 done
 
 if ! grep -q "pbs-no-subscription" /etc/apt/sources.list* 2>/dev/null; then
@@ -256,6 +268,7 @@ if $NETBIRD_DO_SETUP; then
     info "  → Get a setup key at: \e[1;33m${NETBIRD_URL}/peers\e[0m"
     read -p "  Setup Key: " NETBIRD_SETUP_KEY
     echo
+    NETBIRD_USED_KEY="$NETBIRD_SETUP_KEY"  # preserve original value for logic below
 
     # Helper: launch browser auth flow and display the auth URL/code
     _netbird_browser_auth() {
@@ -280,8 +293,14 @@ if $NETBIRD_DO_SETUP; then
             echo -e "  \e[1;33m│  1. Open this URL in your browser:                           │\e[0m"
             echo -e "  \e[1;33m│     $AUTH_URL\e[0m"
         else
-            echo -e "  \e[1;33m│  1. Visit your Netbird dashboard:                            │\e[0m"
-            echo -e "  \e[1;33m│     ${NETBIRD_URL}\e[0m"
+            # Could not extract URL — show full log so user can find it manually
+            echo -e "  \e[1;33m│  1. Could not auto-detect auth URL. Raw log output:          │\e[0m"
+            echo -e "  \e[1;33m│                                                              │\e[0m"
+            while IFS= read -r logline; do
+                printf "  \e[1;33m│  %-60s│\e[0m\n" "$logline"
+            done < /tmp/netbird.log
+            echo -e "  \e[1;33m│                                                              │\e[0m"
+            echo -e "  \e[1;33m│  Copy any URL above into your browser to authorize.          │\e[0m"
         fi
         if [[ -n "$USER_CODE" ]]; then
             echo -e "  \e[1;33m│                                                              │\e[0m"
@@ -316,8 +335,6 @@ if $NETBIRD_DO_SETUP; then
             warn "Setup key did not connect — falling back to browser auth."
             info "  → You can generate a valid key at: \e[1;33m${NETBIRD_URL}/peers\e[0m"
             netbird down 2>/dev/null || true
-            # Kill any lingering netbird up background process
-            pkill -f "netbird up" 2>/dev/null || true
             sleep 3
             _netbird_browser_auth
             NETBIRD_SETUP_KEY=""  # clear so browser confirmation loop runs below
@@ -344,7 +361,13 @@ if $NETBIRD_DO_SETUP; then
     fi
 
     # --- If still not connected, prompt user to confirm browser auth ---
-    if ! $NETBIRD_CONNECTED && [[ -z "$NETBIRD_SETUP_KEY" ]]; then
+    # Note: NETBIRD_USED_KEY tracks original input; NETBIRD_SETUP_KEY may be
+    # cleared to "" if key auth failed and fell back to browser auth.
+    if ! $NETBIRD_CONNECTED; then
+        if [[ -n "$NETBIRD_USED_KEY" && -z "$NETBIRD_SETUP_KEY" ]]; then
+            # Key was tried but failed and we fell back to browser — now wait for browser
+            info "Key auth failed — waiting for browser authorization to complete..."
+        fi
         for attempt in {1..5}; do
             read -p "Have you completed browser authorization? [attempt $attempt/5] (y/n) " -n1 -r; echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
@@ -362,12 +385,12 @@ if $NETBIRD_DO_SETUP; then
             fi
         done
         if ! $NETBIRD_CONNECTED && [[ "$RECAP_NETBIRD" == "-" ]]; then
-            RECAP_NETBIRD="⚠ Max attempts reached — skipping"
+            if [[ -n "$NETBIRD_USED_KEY" && -n "$NETBIRD_SETUP_KEY" ]]; then
+                RECAP_NETBIRD="⚠ Setup key auth failed — check key at ${NETBIRD_URL}/peers"
+            else
+                RECAP_NETBIRD="⚠ Max attempts reached — skipping"
+            fi
         fi
-    elif ! $NETBIRD_CONNECTED && [[ -n "$NETBIRD_SETUP_KEY" ]]; then
-        warn "Setup key auth did not result in a connection. Key may be invalid or expired."
-        info "  → Check your keys at: \e[1;33m${NETBIRD_URL}/peers\e[0m"
-        RECAP_NETBIRD="⚠ Setup key auth failed — check key at ${NETBIRD_URL}/peers"
     fi
 
     [[ $NETBIRD_CONNECTED == true ]] && RECAP_NETBIRD="✔ Connected (${NETBIRD_IP})"
