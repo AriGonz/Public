@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.23
+# Proxmox Backup Server Portable Setup Script v0.24
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.23"
+SCRIPT_VERSION="v0.24"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -548,46 +548,64 @@ fi
 info "Detected SSH client IP: ${CURRENT_SSH_IP:-UNKNOWN — will use fallback open rule}"
 
 # UFW configuration
-# Use a flag file to guarantee UFW setup only runs ONCE — never on re-runs.
-# Any UFW reload during a PBS Shell/noVNC session causes Code 1006 disconnect.
-UFW_DONE_FLAG="/etc/proxmox-portable/ufw-configured"
+# Running any ufw command that changes state from PBS Shell kills the WebSocket.
+# Solution: write UFW config to a one-shot systemd service that runs at next boot.
 
-if [[ -f "$UFW_DONE_FLAG" ]]; then
-    info "UFW already configured (flag present) — skipping to prevent console disconnect"
-    # Still update Netbird rules safely using ufw rules file directly — no reload
-    if $NETBIRD_CONNECTED; then
-        grep -q "100.64.0.0/10" /etc/ufw/user.rules 2>/dev/null || {
-            ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH" 2>/dev/null || true
-            ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS" 2>/dev/null || true
-        }
-        RECAP_FIREWALL="✔ UFW active (Netbird rules verified)"
-    else
-        RECAP_FIREWALL="✔ UFW active (skipped reconfiguration)"
-    fi
-else
-    info "Configuring UFW for the first time..."
-    # Add all allow rules first — order matters
-    ufw allow 22/tcp   comment "SSH always-open"    2>/dev/null || true
-    ufw allow 8006/tcp comment "Proxmox web UI"     2>/dev/null || true
-    ufw allow 8007/tcp comment "PBS web UI + Shell" 2>/dev/null || true
-    ufw allow 3128/tcp comment "Proxmox SPICE"      2>/dev/null || true
-    if $NETBIRD_CONNECTED; then
-        ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH" 2>/dev/null || true
-        ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS" 2>/dev/null || true
-    fi
-    # Set defaults after rules, enable last
-    ufw default deny incoming  2>/dev/null || true
-    ufw default allow outgoing 2>/dev/null || true
-    ufw --force enable
-    ufw reload
-    # Write flag so future re-runs skip this block entirely
-    touch "$UFW_DONE_FLAG"
-    if $NETBIRD_CONNECTED; then
-        RECAP_FIREWALL="✔ UFW enabled (SSH + web UI + Netbird rules)"
-    else
-        RECAP_FIREWALL="⚠ UFW enabled (SSH + web UI — Netbird not connected)"
-    fi
+cat > /usr/local/bin/pbs-ufw-setup << 'UFWSCRIPT'
+#!/bin/bash
+. /etc/proxmox-portable/config 2>/dev/null || true
+: ${PBS_PORT:=8007}
+# Allow rules first
+ufw allow 22/tcp   comment "SSH always-open"
+ufw allow 8006/tcp comment "Proxmox web UI"
+ufw allow 8007/tcp comment "PBS web UI + Shell"
+ufw allow 3128/tcp comment "Proxmox SPICE"
+# LAN subnets
+for iface in $(ip -4 addr show 2>/dev/null | awk '/^[0-9]+:/{i=$2} /inet /{gsub(":","",i); print i}'); do
+    [[ "$iface" == "lo" || "$iface" == "wt0" || "$iface" == "netbird0" ]] && continue
+    IP=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+' | head -1)
+    [[ -n "$IP" ]] || continue
+    SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_network('$IP/24', strict=False))" 2>/dev/null || echo "${IP%.*}.0/24")
+    [[ "$SUBNET" == 100.64* ]] && continue
+    ufw allow from "$SUBNET" to any port 22      comment "LAN SSH"
+    ufw allow from "$SUBNET" to any port $PBS_PORT comment "LAN PBS"
+done
+# Netbird rules if connected
+if ip addr show wt0 2>/dev/null | grep -q "100\." || ip addr show netbird0 2>/dev/null | grep -q "100\."; then
+    ufw allow from 100.64.0.0/10 to any port 22       comment "Netbird SSH"
+    ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS"
 fi
+# Set defaults and enable
+ufw default deny incoming
+ufw default allow outgoing
+ufw --force enable
+ufw reload
+UFWSCRIPT
+chmod +x /usr/local/bin/pbs-ufw-setup
+
+cat > /etc/systemd/system/pbs-ufw-setup.service << 'UFWSVC'
+[Unit]
+Description=PBS Portable — UFW first-boot setup
+After=network-online.target
+ConditionPathExists=!/etc/proxmox-portable/ufw-configured
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pbs-ufw-setup
+ExecStartPost=/usr/bin/touch /etc/proxmox-portable/ufw-configured
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UFWSVC
+
+systemctl daemon-reload
+systemctl enable pbs-ufw-setup.service 2>/dev/null || true
+
+if $NETBIRD_CONNECTED; then
+    RECAP_FIREWALL="✔ UFW scheduled for next reboot (SSH + web UI + Netbird rules)"
+else
+    RECAP_FIREWALL="✔ UFW scheduled for next reboot (SSH + web UI rules)"
+fi
+warn "UFW will activate on next reboot — avoids disconnecting this PBS Shell session"
 
 # ufw-lan-refresh
 cat > /usr/local/bin/ufw-lan-refresh <<'UFWREF'
