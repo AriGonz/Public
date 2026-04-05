@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.21
+# Proxmox Backup Server Portable Setup Script v0.23
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.21"
+SCRIPT_VERSION="v0.23"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -547,35 +547,47 @@ if [[ -z "$CURRENT_SSH_IP" ]]; then
 fi
 info "Detected SSH client IP: ${CURRENT_SSH_IP:-UNKNOWN — will use fallback open rule}"
 
-# UFW: add rules first, then set defaults, then enable.
-# CRITICAL: Never set "default deny" before rules are in place — kills active WebSocket/console.
+# UFW configuration
+# Use a flag file to guarantee UFW setup only runs ONCE — never on re-runs.
+# Any UFW reload during a PBS Shell/noVNC session causes Code 1006 disconnect.
+UFW_DONE_FLAG="/etc/proxmox-portable/ufw-configured"
 
-# Step 1: Add all allow rules FIRST while UFW is still inactive/permissive
-ufw allow 22/tcp comment "SSH always-open" 2>/dev/null || true
-ufw allow 8006/tcp comment "Proxmox web UI" 2>/dev/null || true
-ufw allow 8007/tcp comment "PBS web UI + Shell" 2>/dev/null || true
-ufw allow 3128/tcp comment "Proxmox SPICE" 2>/dev/null || true
-
-if $NETBIRD_CONNECTED; then
-    ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH" 2>/dev/null || true
-    ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS" 2>/dev/null || true
-    RECAP_FIREWALL="✔ UFW enabled (SSH + web UI + Netbird rules)"
+if [[ -f "$UFW_DONE_FLAG" ]]; then
+    info "UFW already configured (flag present) — skipping to prevent console disconnect"
+    # Still update Netbird rules safely using ufw rules file directly — no reload
+    if $NETBIRD_CONNECTED; then
+        grep -q "100.64.0.0/10" /etc/ufw/user.rules 2>/dev/null || {
+            ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH" 2>/dev/null || true
+            ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS" 2>/dev/null || true
+        }
+        RECAP_FIREWALL="✔ UFW active (Netbird rules verified)"
+    else
+        RECAP_FIREWALL="✔ UFW active (skipped reconfiguration)"
+    fi
 else
-    RECAP_FIREWALL="⚠ UFW enabled (SSH + web UI — Netbird not connected)"
+    info "Configuring UFW for the first time..."
+    # Add all allow rules first — order matters
+    ufw allow 22/tcp   comment "SSH always-open"    2>/dev/null || true
+    ufw allow 8006/tcp comment "Proxmox web UI"     2>/dev/null || true
+    ufw allow 8007/tcp comment "PBS web UI + Shell" 2>/dev/null || true
+    ufw allow 3128/tcp comment "Proxmox SPICE"      2>/dev/null || true
+    if $NETBIRD_CONNECTED; then
+        ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH" 2>/dev/null || true
+        ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS" 2>/dev/null || true
+    fi
+    # Set defaults after rules, enable last
+    ufw default deny incoming  2>/dev/null || true
+    ufw default allow outgoing 2>/dev/null || true
+    ufw --force enable
+    ufw reload
+    # Write flag so future re-runs skip this block entirely
+    touch "$UFW_DONE_FLAG"
+    if $NETBIRD_CONNECTED; then
+        RECAP_FIREWALL="✔ UFW enabled (SSH + web UI + Netbird rules)"
+    else
+        RECAP_FIREWALL="⚠ UFW enabled (SSH + web UI — Netbird not connected)"
+    fi
 fi
-
-if [[ -n "$CURRENT_SSH_IP" ]]; then
-    ufw allow from "$CURRENT_SSH_IP" to any port 22 comment "Active SSH session" 2>/dev/null || true
-    info "UFW: whitelisted current SSH client: $CURRENT_SSH_IP"
-fi
-
-# Step 2: Set defaults AFTER rules are in place
-ufw default deny incoming 2>/dev/null || true
-ufw default allow outgoing 2>/dev/null || true
-
-# Step 3: Enable — existing connections are preserved because rules are already active
-ufw --force enable
-ufw reload
 
 # ufw-lan-refresh
 cat > /usr/local/bin/ufw-lan-refresh <<'UFWREF'
