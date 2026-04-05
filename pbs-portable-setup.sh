@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.09
+# Proxmox Backup Server Portable Setup Script v0.10
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.09"
+SCRIPT_VERSION="v0.10"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -76,7 +76,7 @@ NETBIRD_IP=""
 if command -v netbird >/dev/null 2>&1; then
     if netbird status 2>/dev/null | grep -q Connected; then
         NETBIRD_CONNECTED=true
-        NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+        NETBIRD_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
         success "Netbird already connected ($NETBIRD_IP)"
     else
         warn "Netbird installed but not connected"
@@ -323,7 +323,7 @@ if $NETBIRD_DO_SETUP; then
             sleep 2
             if netbird status 2>/dev/null | grep -q Connected; then
                 NETBIRD_CONNECTED=true
-                NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+                NETBIRD_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
                 success "Netbird connected via setup key! ($NETBIRD_IP)"
                 break
             fi
@@ -351,7 +351,7 @@ if $NETBIRD_DO_SETUP; then
             sleep 2
             if netbird status 2>/dev/null | grep -q Connected; then
                 NETBIRD_CONNECTED=true
-                NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+                NETBIRD_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
                 success "Netbird connected! ($NETBIRD_IP)"
                 break
             fi
@@ -374,7 +374,7 @@ if $NETBIRD_DO_SETUP; then
                 sleep 10
                 if netbird status 2>/dev/null | grep -q Connected; then
                     NETBIRD_CONNECTED=true
-                    NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+                    NETBIRD_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
                     success "Netbird connected! ($NETBIRD_IP)"
                     break
                 fi
@@ -479,12 +479,28 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload && systemctl enable --now ufw-lan-refresh.service
 
-# mDNS — FIX: no duplicate apt-get install (avahi already installed in Phase 2)
+# mDNS
 sed -i 's/#enable-reflector=yes/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf
 sed -i '/allow-interfaces/d; /deny-interfaces/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 grep -q "^use-ipv6=no" /etc/avahi/avahi-daemon.conf || echo "use-ipv6=no" >> /etc/avahi/avahi-daemon.conf
-systemctl enable --now avahi-daemon
-RECAP_MDNS="✔ ${NEWHOST}.local:$PBS_PORT"
+# Disable systemd-resolved stub listener if present — conflicts with avahi on some systems
+if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat > /etc/systemd/resolved.conf.d/no-mdns.conf <<EOF
+[Resolve]
+MulticastDNS=no
+EOF
+    systemctl restart systemd-resolved 2>/dev/null || true
+fi
+systemctl enable avahi-daemon 2>/dev/null || true
+systemctl restart avahi-daemon 2>/dev/null || true
+sleep 2
+if systemctl is-active --quiet avahi-daemon; then
+    RECAP_MDNS="✔ ${NEWHOST}.local:$PBS_PORT"
+else
+    warn "avahi-daemon failed to start — mDNS may not work (check: systemctl status avahi-daemon)"
+    RECAP_MDNS="⚠ avahi-daemon failed to start"
+fi
 
 # MOTD — FIX: reduced curl timeouts from 2s to 1s to keep SSH login snappy
 cat > /etc/update-motd.d/99-portable-pbs <<'MOTD'
@@ -498,7 +514,7 @@ for br in vmbr{0..3}; do
     IP=$(ip -4 addr show $br 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+')
     [[ -n $IP ]] && echo "  $br : https://$IP:$PBS_PORT $(curl -sk --max-time 1 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 done
-NB_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1)
+NB_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1)
 echo "Netbird    : ${NB_IP:-Disconnected} $([[ -n $NB_IP ]] && curl -sk --max-time 1 https://$NB_IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "")"
 echo "mDNS       : https://$HOSTNAME.local:$PBS_PORT $(curl -sk --max-time 1 https://$HOSTNAME.local:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 CF_ACTIVE=false
@@ -525,7 +541,7 @@ cat > /etc/issue <<EOF
           Proxmox Backup Server — $HOSTNAME
 
 Hostname   : https://$HOSTNAME:$PBS_PORT
-Netbird    : $(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1 || echo Disconnected)
+Netbird    : $({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1 || echo Disconnected)
 mDNS       : $HOSTNAME.local:$PBS_PORT
 Cloudflared: https://$HOSTNAME.$DOMAIN
 
