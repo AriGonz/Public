@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.19
+# Proxmox Backup Server Portable Setup Script v0.20
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.19"
+SCRIPT_VERSION="v0.20"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -547,31 +547,33 @@ if [[ -z "$CURRENT_SSH_IP" ]]; then
 fi
 info "Detected SSH client IP: ${CURRENT_SSH_IP:-UNKNOWN — will use fallback open rule}"
 
-# Add all rules first, then enable — never the other way around
-ufw --force reset 2>/dev/null || true
+# UFW: configure rules WITHOUT resetting — reset drops active console/SSH connections.
+# Instead, set defaults and add rules idempotently, then enable.
 ufw default deny incoming 2>/dev/null || true
 ufw default allow outgoing 2>/dev/null || true
 
-# UNCONDITIONAL: always allow port 22 from anywhere — absolute lockout prevention
-ufw allow 22/tcp comment "SSH always-open safety rule"
+# Always allow SSH port 22 — absolute lockout prevention
+ufw allow 22/tcp comment "SSH always-open" 2>/dev/null || true
 
-# Additionally whitelist the specific SSH client IP if detected
-if [[ -n "$CURRENT_SSH_IP" ]]; then
-    ufw allow from "$CURRENT_SSH_IP" to any port 22 comment "Active SSH session"
-    info "UFW: whitelisted current SSH client: $CURRENT_SSH_IP"
-else
-    warn "Could not detect SSH client IP — port 22 open to all (safety fallback)"
-fi
+# Always allow Proxmox/PBS web UI and console ports — prevents dropping noVNC sessions
+ufw allow 8006/tcp comment "Proxmox web UI" 2>/dev/null || true
+ufw allow 8007/tcp comment "PBS web UI" 2>/dev/null || true
+ufw allow 3128/tcp comment "Proxmox SPICE" 2>/dev/null || true
 
 if $NETBIRD_CONNECTED; then
-    ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH"
-    ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS"
-    RECAP_FIREWALL="✔ UFW enabled (Netbird + LAN rules)"
+    ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH" 2>/dev/null || true
+    ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS" 2>/dev/null || true
+    RECAP_FIREWALL="✔ UFW enabled (SSH + web UI + Netbird rules)"
 else
-    RECAP_FIREWALL="⚠ UFW enabled (SSH only — Netbird not connected)"
+    RECAP_FIREWALL="⚠ UFW enabled (SSH + web UI — Netbird not connected)"
 fi
 
-# NOW enable — all rules are already in place
+if [[ -n "$CURRENT_SSH_IP" ]]; then
+    ufw allow from "$CURRENT_SSH_IP" to any port 22 comment "Active SSH session" 2>/dev/null || true
+    info "UFW: whitelisted current SSH client: $CURRENT_SSH_IP"
+fi
+
+# Enable UFW — rules are already in place, this will not drop existing connections
 ufw --force enable
 ufw reload
 
