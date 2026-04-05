@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.12
+# Proxmox Backup Server Portable Setup Script v0.13
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.12"
+SCRIPT_VERSION="v0.13"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -631,41 +631,65 @@ systemctl daemon-reload && systemctl enable --now netbird-tty-refresh.service
 # PHASE 6 — Nag Removal
 # =============================================================================
 info "Phase 6: Subscription nag removal"
-# FIX: initialize to empty so the "not found" fallback check works correctly
 RECAP_NAG=""
-for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
+
+# Write the patcher as a temp script — avoids all shell quoting/expansion issues
+cat > /tmp/pbs-nag-patch.py << 'NAGPY'
+import sys, re
+
+js_path = sys.argv[1]
+try:
+    with open(js_path, encoding='utf-8', errors='replace') as f:
+        src = f.read()
+except Exception as e:
+    print(f"Cannot read {js_path}: {e}", file=sys.stderr)
+    sys.exit(2)
+
+# Check if already patched
+if 'void_check' in src or 'NoMoreNagging' in src:
+    sys.exit(3)  # already patched
+
+# Patch 1: subscription_check token replace (fast, no regex)
+patched = src.replace('.subscription_check(', '.void_check(')
+
+# Patch 2: Ext.Msg.show nag — bounded [^;]* so it cannot crawl the whole file
+patched = re.sub(
+    r"(Ext\.Msg\.show\(\{[^;]{0,300}?title:\s*gettext\('No valid sub)",
+    r"void({ // \1",
+    patched
+)
+
+if patched == src:
+    sys.exit(1)  # pattern not found
+
+with open(js_path, 'w', encoding='utf-8') as f:
+    f.write(patched)
+sys.exit(0)
+NAGPY
+
+for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js \
+          /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
     [[ -f "$JS" ]] || continue
     cp "$JS" "${JS}.bak.$(date +%s)"
-    # python3 inline patch — sed -z and perl -0 both hang on large minified JS files
-    python3 -c "
-import sys, re
-js = open('$JS', encoding='utf-8', errors='replace').read()
-# Target subscription_check token (no greedy multiline crawl needed)
-p = js.replace('.subscription_check(', '.void_check(')
-# Also patch Ext.Msg.show nag — single-line match only
-p = re.sub(r\"(Ext\\.Msg\\.show\\(\\{[^}]*?title:\\s*gettext\\('No valid sub)\", r\"void({ // \\1\", p)
-changed = p != js
-open('$JS', 'w', encoding='utf-8').write(p) if changed else None
-sys.exit(0 if changed else 1)
-" 2>/dev/null
-    if [[ $? -eq 0 ]]; then
-        systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
-        RECAP_NAG="✔ Patched"
-        success "Subscription nag patched"
-    else
-        if grep -q 'void_check\|void({' "$JS" 2>/dev/null; then
-            RECAP_NAG="✔ Already patched (prior run)"
-        else
-            LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
-            [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
-            RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
-            warn "Nag patch: pattern not found — skipping"
-        fi
-    fi
+    python3 /tmp/pbs-nag-patch.py "$JS"
+    RC=$?
+    case $RC in
+        0) systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
+           RECAP_NAG="✔ Patched"
+           success "Subscription nag patched" ;;
+        3) RECAP_NAG="✔ Already patched (prior run)"
+           success "Subscription nag already patched" ;;
+        1) LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
+           [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
+           RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
+           warn "Nag patch: pattern not found" ;;
+        *) RECAP_NAG="⚠ Patch script error (rc=$RC)"
+           warn "Nag patch: unexpected error" ;;
+    esac
     break
 done
-# FIX: RECAP_NAG was initialized to "-" before, so [[ -z ]] never fired
 [[ -z "$RECAP_NAG" ]] && RECAP_NAG="⚠ JS file not found"
+rm -f /tmp/pbs-nag-patch.py
 
 # =============================================================================
 # PHASE 7 — Networking (VM-safe)
