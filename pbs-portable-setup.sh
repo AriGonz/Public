@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.36
+# Proxmox Backup Server Portable Setup Script v0.38
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -14,7 +14,7 @@ LOG_FILE="/var/log/pbs-setup.log"
 echo "" >> "$LOG_FILE"
 echo "=== PBS Setup started: $(date) ===" | tee -a "$LOG_FILE"
 
-SCRIPT_VERSION="v0.36"
+SCRIPT_VERSION="v0.38"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -120,7 +120,7 @@ fi
 
 # If a modern debian.sources file exists, remove any conflicting legacy deb lines
 # from sources.list to prevent "configured multiple times" warnings
-if ls /etc/apt/sources.list.d/*.sources 2>/dev/null | xargs grep -lqs "deb.debian.org" 2>/dev/null; then
+if grep -rql --include="*.sources" "deb.debian.org" /etc/apt/sources.list.d/ 2>/dev/null; then
     if grep -q "deb.debian.org" /etc/apt/sources.list 2>/dev/null; then
         info "Removing duplicate Debian repo lines from sources.list (already in .sources format)"
         sed -i '/deb.debian.org/d; /debian-security/d' /etc/apt/sources.list
@@ -228,8 +228,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -q htop curl git jq wget ufw a
 # Now wait for the background upgrade to complete
 if [[ -n "$APT_UPGRADE_PID" ]]; then
     info "Waiting for system upgrade to finish..."
-    wait "$APT_UPGRADE_PID" 2>/dev/null || true
-    APT_RC=$?
+    wait "$APT_UPGRADE_PID" 2>/dev/null; APT_RC=$?
     if [[ $APT_RC -eq 0 ]]; then
         DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -q > /dev/null 2>&1 || true
         RECAP_UPGRADE="✔ Packages upgraded"
@@ -437,7 +436,7 @@ if $NETBIRD_DO_SETUP; then
             info "Enabling Netbird SSH support..."
             netbird down 2>/dev/null || true
             sleep 2
-            netbird up --management-url "$NETBIRD_URL" --allow-server-ssh --enable-ssh-root > /tmp/netbird-ssh.log 2>&1 &
+            netbird up --management-url "$NETBIRD_URL" --allow-server-ssh > /tmp/netbird-ssh.log 2>&1 &
             sleep 5
             if netbird status 2>/dev/null | grep -q Connected; then
                 success "Netbird SSH enabled"
@@ -458,7 +457,7 @@ if command -v cloudflared >/dev/null 2>&1; then
     success "cloudflared already installed"
     RECAP_CLOUDFLARED="✔ Already installed"
 else
-    mkdir -p --mode=0755 /usr/share/keyrings
+    mkdir -p /usr/share/keyrings && chmod 0755 /usr/share/keyrings
     curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
     echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' > /etc/apt/sources.list.d/cloudflared.list
     apt-get update -qq && apt-get install -y cloudflared
@@ -523,8 +522,6 @@ info "Phase 5: Security + dynamic access"
 # current SSH session. Always whitelist the current client IP first.
 
 # SSH IP detection not needed — UFW is deferred to boot service
-CURRENT_SSH_IP=""
-
 # UFW configuration
 # Running any ufw command that changes state from PBS Shell kills the WebSocket.
 # Solution: write UFW config to a one-shot systemd service that runs at next boot.
@@ -781,7 +778,7 @@ else
     else
         _log "[P6] Not yet patched — scanning for patterns..."
         # Log what patterns exist in the file
-        grep -o 'subscription_check\|No valid sub\|Ext\.Msg\.show' "$JS_FOUND" 2>/dev/null | sort -u | while read -r p; do _log "[P6] Found pattern: $p"; done
+        grep -oE 'subscription_check|No valid sub|Ext\.Msg\.show' "$JS_FOUND" 2>/dev/null | sort -u | while read -r p; do _log "[P6] Found pattern: $p"; done
 
         cp "$JS_FOUND" "${JS_FOUND}.bak.$(date +%s)"
         _log "[P6] Backup created"
@@ -845,7 +842,7 @@ iface vmbr$i inet dhcp
         bridge-maxwait 0
 
 EOF
-                ((i++))
+                i=$((i + 1))
             done
             RECAP_NETWORK="✔ Dual DHCP bridges written (reboot required)"
         else
