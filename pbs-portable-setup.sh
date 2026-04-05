@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.11
+# Proxmox Backup Server Portable Setup Script v0.12
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.11"
+SCRIPT_VERSION="v0.12"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -636,15 +636,31 @@ RECAP_NAG=""
 for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
     [[ -f "$JS" ]] || continue
     cp "$JS" "${JS}.bak.$(date +%s)"
-    # Use perl instead of sed -Ezi — sed -z hangs on large JS files
-    perl -i -0pe 's/(Ext\.Msg\.show\(\{[\s\S]*?title:[\s]*gettext\(['\''"]No valid sub)/void({ \/\/ $1/g' "$JS" 2>/dev/null || true
-    if grep -q 'void({' "$JS"; then
+    # python3 inline patch — sed -z and perl -0 both hang on large minified JS files
+    python3 -c "
+import sys, re
+js = open('$JS', encoding='utf-8', errors='replace').read()
+# Target subscription_check token (no greedy multiline crawl needed)
+p = js.replace('.subscription_check(', '.void_check(')
+# Also patch Ext.Msg.show nag — single-line match only
+p = re.sub(r\"(Ext\\.Msg\\.show\\(\\{[^}]*?title:\\s*gettext\\('No valid sub)\", r\"void({ // \\1\", p)
+changed = p != js
+open('$JS', 'w', encoding='utf-8').write(p) if changed else None
+sys.exit(0 if changed else 1)
+" 2>/dev/null
+    if [[ $? -eq 0 ]]; then
         systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
         RECAP_NAG="✔ Patched"
+        success "Subscription nag patched"
     else
-        LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
-        [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
-        RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
+        if grep -q 'void_check\|void({' "$JS" 2>/dev/null; then
+            RECAP_NAG="✔ Already patched (prior run)"
+        else
+            LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
+            [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
+            RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
+            warn "Nag patch: pattern not found — skipping"
+        fi
     fi
     break
 done
