@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.13
+# Proxmox Backup Server Portable Setup Script v0.14
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.13"
+SCRIPT_VERSION="v0.14"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -521,29 +521,33 @@ TimeoutStartSec=90
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload && systemctl enable --now ufw-lan-refresh.service
+systemctl daemon-reload
+systemctl enable ufw-lan-refresh.service 2>/dev/null || true
+systemctl start --no-block ufw-lan-refresh.service 2>/dev/null || true
 
 # mDNS
 sed -i 's/#enable-reflector=yes/enable-reflector=yes/' /etc/avahi/avahi-daemon.conf
 sed -i '/allow-interfaces/d; /deny-interfaces/d' /etc/avahi/avahi-daemon.conf 2>/dev/null || true
 grep -q "^use-ipv6=no" /etc/avahi/avahi-daemon.conf || echo "use-ipv6=no" >> /etc/avahi/avahi-daemon.conf
-# Disable systemd-resolved stub listener if present — conflicts with avahi on some systems
+# Disable systemd-resolved mDNS stub — conflicts with avahi
 if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
     mkdir -p /etc/systemd/resolved.conf.d
     cat > /etc/systemd/resolved.conf.d/no-mdns.conf <<EOF
 [Resolve]
 MulticastDNS=no
 EOF
-    systemctl restart systemd-resolved 2>/dev/null || true
+    # --no-block so we do not wait for resolved to fully restart
+    systemctl restart --no-block systemd-resolved 2>/dev/null || true
 fi
 systemctl enable avahi-daemon 2>/dev/null || true
-systemctl restart avahi-daemon 2>/dev/null || true
-sleep 2
-if systemctl is-active --quiet avahi-daemon; then
+# --no-block prevents hanging if avahi fails — we check status separately
+systemctl restart --no-block avahi-daemon 2>/dev/null || true
+sleep 3
+if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
     RECAP_MDNS="✔ ${NEWHOST}.local:$PBS_PORT"
 else
-    warn "avahi-daemon failed to start — mDNS may not work (check: systemctl status avahi-daemon)"
-    RECAP_MDNS="⚠ avahi-daemon failed to start"
+    warn "avahi-daemon not running — mDNS may not work (non-fatal, continuing)"
+    RECAP_MDNS="⚠ avahi-daemon not running (mDNS unavailable)"
 fi
 
 # MOTD — FIX: reduced curl timeouts from 2s to 1s to keep SSH login snappy
@@ -625,7 +629,9 @@ TimeoutStartSec=240
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload && systemctl enable --now netbird-tty-refresh.service
+systemctl daemon-reload
+systemctl enable netbird-tty-refresh.service 2>/dev/null || true
+systemctl start --no-block netbird-tty-refresh.service 2>/dev/null || true
 
 # =============================================================================
 # PHASE 6 — Nag Removal
