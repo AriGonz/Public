@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.06
+# Proxmox Backup Server Portable Setup Script v0.07
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.06"
+SCRIPT_VERSION="v0.07"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -100,10 +100,15 @@ if ! grep -q "pbs-no-subscription" /etc/apt/sources.list* 2>/dev/null; then
     echo "deb http://download.proxmox.com/debian/pbs $CODENAME pbs-no-subscription" >> /etc/apt/sources.list
 fi
 
-# Only add Debian repos if not already present in ANY apt source file
-if grep -rqs "deb.debian.org" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-    info "Debian repos already present — skipping"
-else
+# If a modern debian.sources file exists, remove any conflicting legacy deb lines
+# from sources.list to prevent "configured multiple times" warnings
+if ls /etc/apt/sources.list.d/*.sources 2>/dev/null | xargs grep -lqs "deb.debian.org" 2>/dev/null; then
+    if grep -q "deb.debian.org" /etc/apt/sources.list 2>/dev/null; then
+        info "Removing duplicate Debian repo lines from sources.list (already in .sources format)"
+        sed -i '/deb.debian.org/d; /debian-security/d' /etc/apt/sources.list
+    fi
+# Only add Debian repos to sources.list if not present anywhere
+elif ! grep -rqs "deb.debian.org" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
     cat <<EOF >> /etc/apt/sources.list
 
 deb http://deb.debian.org/debian $CODENAME main contrib non-free non-free-firmware
@@ -255,10 +260,17 @@ if $NETBIRD_DO_SETUP; then
     # Helper: launch browser auth flow and display the auth URL/code
     _netbird_browser_auth() {
         info "Starting browser auth flow..."
+        rm -f /tmp/netbird.log
         netbird up --management-url "$NETBIRD_URL" > /tmp/netbird.log 2>&1 &
-        sleep 8
-        # Try to extract a device-flow URL (contains a user code to enter)
-        AUTH_URL=$(grep -oP 'https://\S+' /tmp/netbird.log | grep -Ev '\.(png|svg|js|css)' | grep -E 'auth|device|login|activate|verify|connect' | head -1)
+        # Self-hosted IDP can be slow — wait up to 15s for the auth URL to appear
+        for _w in {1..15}; do
+            sleep 1
+            grep -qP 'https://' /tmp/netbird.log 2>/dev/null && break
+        done
+        # Extract any HTTPS URL from the log — show all of them if needed
+        AUTH_URL=$(grep -oP 'https://\S+' /tmp/netbird.log | grep -Ev '\.(png|svg|js|css)' | grep -E 'auth|device|login|activate|verify|connect|oauth|token' | head -1)
+        # Fallback: just grab the first https URL that isn't the management server itself
+        [[ -z "$AUTH_URL" ]] && AUTH_URL=$(grep -oP 'https://\S+' /tmp/netbird.log | grep -v "$NETBIRD_URL" | grep -Ev '\.(png|svg|js|css)' | head -1)
         USER_CODE=$(grep -oP '(?i)code[[:space:]]*:[[:space:]]*\K[A-Z0-9]{4,}' /tmp/netbird.log | head -1)
         echo
         echo -e "  \e[1;33m┌──────────────────────────────────────────────────────────────┐\e[0m"
@@ -304,7 +316,9 @@ if $NETBIRD_DO_SETUP; then
             warn "Setup key did not connect — falling back to browser auth."
             info "  → You can generate a valid key at: \e[1;33m${NETBIRD_URL}/peers\e[0m"
             netbird down 2>/dev/null || true
-            sleep 2
+            # Kill any lingering netbird up background process
+            pkill -f "netbird up" 2>/dev/null || true
+            sleep 3
             _netbird_browser_auth
             NETBIRD_SETUP_KEY=""  # clear so browser confirmation loop runs below
         fi
