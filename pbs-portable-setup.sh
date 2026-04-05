@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.31
+# Proxmox Backup Server Portable Setup Script v0.33
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -9,17 +9,12 @@
 
 # Note: pipefail intentionally disabled — interactive setup script uses explicit error handling
 
-# Log all output to file using a named pipe — reliable across all bash invocations
+# Simple logging — append all output to log file while showing on screen
 LOG_FILE="/var/log/pbs-setup.log"
-PIPE=$(mktemp -u /tmp/pbs-log-XXXXXX)
-mkfifo "$PIPE"
-tee -a "$LOG_FILE" < "$PIPE" &
-TEE_PID=$!
-exec > "$PIPE" 2>&1
-echo ""
-echo "=== PBS Setup started: $(date) ==="
+echo "" >> "$LOG_FILE"
+echo "=== PBS Setup started: $(date) ===" | tee -a "$LOG_FILE"
 
-SCRIPT_VERSION="v0.31"
+SCRIPT_VERSION="v0.33"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -36,10 +31,11 @@ RECAP_NETBIRD="-" RECAP_CLOUDFLARED="-" RECAP_FIREWALL="-"
 RECAP_MOTD="-" RECAP_MDNS="-" RECAP_NAG="" RECAP_NETWORK="-"
 RECAP_SSH_KEYS="-" RECAP_GUESTAGENT="-"
 
-success() { echo -e "\e[32m[✔] $1\e[0m"; }
-warn()    { echo -e "\e[33m[⚠] $1\e[0m"; }
-error()   { echo -e "\e[31m[✖] $1\e[0m"; exit 1; }
-info()    { echo -e "\e[34m[i] $1\e[0m"; }
+_log() { echo "$1" >> "$LOG_FILE" 2>/dev/null || true; }
+success() { local m="[✔] $1"; echo -e "\e[32m${m}\e[0m"; _log "$m"; }
+warn()    { local m="[⚠] $1"; echo -e "\e[33m${m}\e[0m"; _log "$m"; }
+error()   { local m="[✖] $1"; echo -e "\e[31m${m}\e[0m"; _log "$m"; exit 1; }
+info()    { local m="[i] $1";  echo -e "\e[34m${m}\e[0m"; _log "$m"; }
 
 print_recap_box() {
     echo
@@ -547,7 +543,7 @@ for iface in $(ip -4 addr show 2>/dev/null | awk '/^[0-9]+:/{i=$2} /inet /{gsub(
     [[ "$iface" == "lo" || "$iface" == "wt0" || "$iface" == "netbird0" ]] && continue
     IP=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+' | head -1)
     [[ -n "$IP" ]] || continue
-    SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_network('$IP/24', strict=False))" 2>/dev/null || echo "${IP%.*}.0/24")
+    SUBNET="${IP%.*}.0/24"
     [[ "$SUBNET" == 100.64* ]] && continue
     ufw allow from "$SUBNET" to any port 22      comment "LAN SSH"
     ufw allow from "$SUBNET" to any port $PBS_PORT comment "LAN PBS"
@@ -603,7 +599,7 @@ for iface in $(ip -4 addr show 2>/dev/null | awk '/^[0-9]+:/{iface=$2} /inet /{g
     [[ "$iface" == "lo" || "$iface" == "wt0" || "$iface" == "netbird0" ]] && continue
     IP=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+' | head -1)
     [[ -n $IP ]] || continue
-    SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_network('$IP/24', strict=False))" 2>/dev/null || echo "${IP%.*}.0/24")
+    SUBNET="${IP%.*}.0/24"
     [[ $SUBNET != 100.64* ]] && SUBNETS+=("$SUBNET")
 done
 
@@ -762,63 +758,42 @@ systemctl start --no-block netbird-tty-refresh.service 2>/dev/null || true
 info "Phase 6: Subscription nag removal"
 RECAP_NAG=""
 
-# Write the patcher as a temp script — avoids all shell quoting/expansion issues
-cat > /tmp/pbs-nag-patch.py << 'NAGPY'
-import sys, re
-
-js_path = sys.argv[1]
-try:
-    with open(js_path, encoding='utf-8', errors='replace') as f:
-        src = f.read()
-except Exception as e:
-    print(f"Cannot read {js_path}: {e}", file=sys.stderr)
-    sys.exit(2)
-
-# Check if already patched
-if 'void_check' in src or 'NoMoreNagging' in src:
-    sys.exit(3)  # already patched
-
-# Patch 1: subscription_check token replace (fast, no regex)
-patched = src.replace('.subscription_check(', '.void_check(')
-
-# Patch 2: Ext.Msg.show nag — bounded [^;]* so it cannot crawl the whole file
-patched = re.sub(
-    r"(Ext\.Msg\.show\(\{[^;]{0,300}?title:\s*gettext\('No valid sub)",
-    r"void({ // \1",
-    patched
-)
-
-if patched == src:
-    sys.exit(1)  # pattern not found
-
-with open(js_path, 'w', encoding='utf-8') as f:
-    f.write(patched)
-sys.exit(0)
-NAGPY
-
-for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js \
-          /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
+for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js           /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
     [[ -f "$JS" ]] || continue
+
+    # Check if already patched
+    if grep -q 'void_check\|NoMoreNagging' "$JS" 2>/dev/null; then
+        RECAP_NAG="✔ Already patched (prior run)"
+        success "Subscription nag already patched"
+        break
+    fi
+
     cp "$JS" "${JS}.bak.$(date +%s)"
-    python3 /tmp/pbs-nag-patch.py "$JS"
-    RC=$?
-    case $RC in
-        0) systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
-           RECAP_NAG="✔ Patched"
-           success "Subscription nag patched" ;;
-        3) RECAP_NAG="✔ Already patched (prior run)"
-           success "Subscription nag already patched" ;;
-        1) LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
-           [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
-           RECAP_NAG="⚠ Pattern not matched — JS may have changed"
-           warn "Nag patch: pattern not found — check /var/log/pbs-setup.log" ;;
-        *) RECAP_NAG="⚠ Patch script error (rc=$RC)"
-           warn "Nag patch: unexpected error (rc=$RC)" ;;
-    esac
+
+    # Patch 1: replace .subscription_check( call with .void_check(
+    sed -i 's/\.subscription_check(/.void_check(/g' "$JS"
+
+    # Patch 2: disable Ext.Msg.show nag popup
+    # Use | as delimiter to avoid escaping issues with /
+    sed -i "s|Ext\.Msg\.show({title:gettext('No valid sub|void({ //Ext.Msg.show({title:gettext('No valid sub|g" "$JS"
+    # Also handle with spaces around the colon
+    sed -i "s|Ext\.Msg\.show({ title: gettext('No valid sub|void({ //Ext.Msg.show({ title: gettext('No valid sub|g" "$JS"
+
+    # Verify at least one patch landed
+    if grep -q 'void_check\|void({' "$JS" 2>/dev/null; then
+        systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
+        RECAP_NAG="✔ Patched"
+        success "Subscription nag patched"
+    else
+        # Restore backup — nothing changed
+        LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
+        [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
+        RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
+        warn "Nag patch: pattern not found"
+    fi
     break
 done
 [[ -z "$RECAP_NAG" ]] && RECAP_NAG="⚠ JS file not found"
-rm -f /tmp/pbs-nag-patch.py
 
 # =============================================================================
 # PHASE 7 — Networking (VM-safe)
@@ -870,8 +845,4 @@ info "Next node one-liner:"
 echo "  bash -c \"\$(curl -fsSL $SETUP_SCRIPT_URL)\""
 
 read -p "Reboot now? (y/N): " -n1 -r; echo
-# Close the log pipe cleanly
-exec > /dev/tty 2>&1
-rm -f "$PIPE"
-wait "$TEE_PID" 2>/dev/null || true
 [[ $REPLY =~ ^[Yy]$ ]] && reboot
