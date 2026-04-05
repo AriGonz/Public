@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.24
+# Proxmox Backup Server Portable Setup Script v0.28
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,13 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.24"
+# Tee all output to a log file — check /var/log/pbs-setup.log if disconnected
+LOG_FILE="/var/log/pbs-setup.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo ""
+echo "=== PBS Setup started: $(date) ==="
+
+SCRIPT_VERSION="v0.28"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -62,6 +68,7 @@ echo -e "\e[34m║         Proxmox Backup Server — Portable Setup             
 printf  "\e[34m║                    %-10s                               ║\e[0m\n" "$SCRIPT_VERSION"
 echo -e "\e[34m╚══════════════════════════════════════════════════════════════╝\e[0m"
 echo
+
 
 # =============================================================================
 # PRE-CHECKS
@@ -516,36 +523,8 @@ info "Phase 5: Security + dynamic access"
 # IMPORTANT: Add all rules BEFORE enabling UFW to prevent locking out the
 # current SSH session. Always whitelist the current client IP first.
 
-# Detect current SSH client IP — debug all methods
-info "--- SSH IP Detection Debug ---"
-info "SSH_CLIENT env : [${SSH_CLIENT}]"
-info "SSH_CONNECTION : [${SSH_CONNECTION}]"
-info "who am i       : [$(who am i 2>/dev/null)]"
-info "ss port 22     : [$(ss -tnp 2>/dev/null | grep ":22 ")]"
-info "lastlog        : [$(lastlog -u root 2>/dev/null | tail -1)]"
-info "netstat        : [$(netstat -tnp 2>/dev/null | grep ":22 " | grep ESTABLISHED | head -3)]"
-info "w output       : [$(w -h 2>/dev/null | head -3)]"
-info "-----------------------------"
-
-# Method 1: $SSH_CONNECTION (more reliable than SSH_CLIENT in subshells)
-CURRENT_SSH_IP=$(echo "$SSH_CONNECTION" | awk '{print $1}' 2>/dev/null)
-# Method 2: $SSH_CLIENT
-if [[ -z "$CURRENT_SSH_IP" ]]; then
-    CURRENT_SSH_IP=$(echo "$SSH_CLIENT" | awk '{print $1}' 2>/dev/null)
-fi
-# Method 3: ss established on port 22 — handle both addr:port and [addr]:port formats
-if [[ -z "$CURRENT_SSH_IP" ]]; then
-    CURRENT_SSH_IP=$(ss -tnp 2>/dev/null | grep "ESTAB" | grep ":22 " | awk '{print $5}' | sed 's/:[0-9]*$//; s/\[//g; s/\]//g' | grep -v "^$" | head -1)
-fi
-# Method 4: who am i
-if [[ -z "$CURRENT_SSH_IP" ]]; then
-    CURRENT_SSH_IP=$(who am i 2>/dev/null | awk -F"[()]" '{print $2}' | grep -v "^$" | head -1)
-fi
-# Method 5: w command
-if [[ -z "$CURRENT_SSH_IP" ]]; then
-    CURRENT_SSH_IP=$(w -h 2>/dev/null | awk '{print $3}' | grep -E "^[0-9]+\." | head -1)
-fi
-info "Detected SSH client IP: ${CURRENT_SSH_IP:-UNKNOWN — will use fallback open rule}"
+# SSH IP detection not needed — UFW is deferred to boot service
+CURRENT_SSH_IP=""
 
 # UFW configuration
 # Running any ufw command that changes state from PBS Shell kills the WebSocket.
