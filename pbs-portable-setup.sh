@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.35
+# Proxmox Backup Server Portable Setup Script v0.36
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -14,7 +14,7 @@ LOG_FILE="/var/log/pbs-setup.log"
 echo "" >> "$LOG_FILE"
 echo "=== PBS Setup started: $(date) ===" | tee -a "$LOG_FILE"
 
-SCRIPT_VERSION="v0.35"
+SCRIPT_VERSION="v0.36"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -813,6 +813,7 @@ else
 fi
 _log "[P6] Done. RECAP_NAG=$RECAP_NAG"
 
+_log "[MILESTONE] Phase 6 complete — entering Phase 7"
 # =============================================================================
 # PHASE 7 — Networking (VM-safe)
 # =============================================================================
@@ -853,6 +854,7 @@ EOF
     fi
 fi
 
+_log "[MILESTONE] Phase 7 complete — entering Phase 8 (recap)"
 # =============================================================================
 # PHASE 8 — Recap
 # =============================================================================
@@ -863,4 +865,5 @@ info "Next node one-liner:"
 echo "  bash -c \"\$(curl -fsSL $SETUP_SCRIPT_URL)\""
 
 read -p "Reboot now? (y/N): " -n1 -r; echo
+_log "[MILESTONE] Script completed successfully"
 [[ $REPLY =~ ^[Yy]$ ]] && reboot
