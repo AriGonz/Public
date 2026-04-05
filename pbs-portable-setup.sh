@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.38
+# Proxmox Backup Server Portable Setup Script v0.39
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -14,7 +14,7 @@ LOG_FILE="/var/log/pbs-setup.log"
 echo "" >> "$LOG_FILE"
 echo "=== PBS Setup started: $(date) ===" | tee -a "$LOG_FILE"
 
-SCRIPT_VERSION="v0.38"
+SCRIPT_VERSION="v0.39"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -42,19 +42,19 @@ print_recap_box() {
     echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
     printf  "\e[34m║               PBS PORTABLE SETUP RECAP (%-6s)               ║\e[0m\n" "$SCRIPT_VERSION"
     echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Hostname:"     "$RECAP_HOSTNAME"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Domain:"       "$RECAP_DOMAIN"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "SSH Keys:"     "$RECAP_SSH_KEYS"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Repos:"        "$RECAP_REPOS"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Upgrade:"      "$RECAP_UPGRADE"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Guest Agent:"  "$RECAP_GUESTAGENT"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Netbird:"      "$RECAP_NETBIRD"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Cloudflared:"  "$RECAP_CLOUDFLARED"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Firewall:"     "$RECAP_FIREWALL"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "mDNS:"         "$RECAP_MDNS"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "MOTD/Console:" "$RECAP_MOTD"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Nag Removal:"  "$RECAP_NAG"
-    printf "\e[34m║  %-20s  %s\e[0m\n" "Networking:"   "$RECAP_NETWORK"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Hostname:"     "$RECAP_HOSTNAME"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Domain:"       "$RECAP_DOMAIN"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "SSH Keys:"     "$RECAP_SSH_KEYS"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Repos:"        "$RECAP_REPOS"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Upgrade:"      "$RECAP_UPGRADE"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Guest Agent:"  "$RECAP_GUESTAGENT"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Netbird:"      "$RECAP_NETBIRD"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Cloudflared:"  "$RECAP_CLOUDFLARED"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Firewall:"     "$RECAP_FIREWALL"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "mDNS:"         "$RECAP_MDNS"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "MOTD/Console:" "$RECAP_MOTD"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Nag Removal:"  "$RECAP_NAG"
+    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Networking:"   "$RECAP_NETWORK"
     echo -e "\e[34m╚══════════════════════════════════════════════════════════════╝\e[0m"
 }
 
@@ -439,6 +439,7 @@ if $NETBIRD_DO_SETUP; then
             netbird up --management-url "$NETBIRD_URL" --allow-server-ssh > /tmp/netbird-ssh.log 2>&1 &
             sleep 5
             if netbird status 2>/dev/null | grep -q Connected; then
+                NETBIRD_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
                 success "Netbird SSH enabled"
                 RECAP_NETBIRD="✔ Connected + SSH enabled (${NETBIRD_IP})"
             else
@@ -670,13 +671,11 @@ cat > /etc/update-motd.d/99-portable-pbs <<'MOTD'
 : ${DOMAIN:=local} ${PBS_PORT:=8007} ${HOSTNAME:=pbs}
 echo "=== Proxmox Backup Server — $HOSTNAME ==="
 echo "Hostname   : https://$HOSTNAME:$PBS_PORT $(curl -sk --max-time 1 https://$HOSTNAME:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
-echo "IPs:"
 # Scan all interfaces — bridges (vmbr*) and regular NICs (nic*, eth*, ens*, enp*)
 for iface in $(ip -4 addr show 2>/dev/null | awk '/^[0-9]+:/{iface=$2} /inet /{gsub(":","",iface); print iface}'); do
-    # Skip loopback and Netbird tunnel
     [[ "$iface" == "lo" || "$iface" == "wt0" || "$iface" == "netbird0" ]] && continue
     IP=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+' | head -1)
-    [[ -n $IP ]] && echo "  $iface : https://$IP:$PBS_PORT $(curl -sk --max-time 1 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
+    [[ -n $IP ]] && echo "IP ($iface)  : https://$IP:$PBS_PORT $(curl -sk --max-time 1 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 done
 NB_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1)
 echo "Netbird    : ${NB_IP:-Disconnected} $([[ -n $NB_IP ]] && curl -sk --max-time 1 https://$NB_IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "")"
@@ -698,20 +697,26 @@ cat > /usr/local/bin/update-console-issue <<'CONSOLE'
 #!/bin/bash
 . /etc/proxmox-portable/config 2>/dev/null || true
 : ${DOMAIN:=local} ${PBS_PORT:=8007}
-cat > /etc/issue <<EOF
-
-═══════════════════════════════════════════════════════════════
-
-          Proxmox Backup Server — $HOSTNAME
-
-Hostname   : https://$HOSTNAME:$PBS_PORT
-Netbird    : $({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1 || echo Disconnected)
-mDNS       : $HOSTNAME.local:$PBS_PORT
-Cloudflared: https://$HOSTNAME.$DOMAIN
-
-═══════════════════════════════════════════════════════════════
-
-EOF
+{
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+    echo "          Proxmox Backup Server — $HOSTNAME"
+    echo ""
+    echo "Hostname   : https://$HOSTNAME:$PBS_PORT"
+    for iface in $(ip -4 addr show 2>/dev/null | awk '/^[0-9]+:/{iface=$2} /inet /{gsub(":","",iface); print iface}'); do
+        [[ "$iface" == "lo" || "$iface" == "wt0" || "$iface" == "netbird0" ]] && continue
+        IP=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP "(?<=inet\s)[0-9.]+" | head -1)
+        [[ -n "$IP" ]] && echo "IP ($iface)  : https://$IP:$PBS_PORT"
+    done
+    NB_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP "(?<=inet\s)100\.[0-9.]+" | cut -d/ -f1)
+    echo "Netbird    : ${NB_IP:-Disconnected}"
+    echo "mDNS       : $HOSTNAME.local:$PBS_PORT"
+    echo "Cloudflared: https://$HOSTNAME.$DOMAIN"
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
+} > /etc/issue
 CONSOLE
 chmod +x /usr/local/bin/update-console-issue
 
@@ -772,7 +777,7 @@ if [[ -z "$JS_FOUND" ]]; then
     warn "Nag patch: no JS file found"
 else
     _log "[P6] Checking if already patched..."
-    if grep -q 'void_check\|NoMoreNagging' "$JS_FOUND" 2>/dev/null; then
+    if grep -qE 'void_check|NoMoreNagging|checked_command.*return orig_cmd' "$JS_FOUND" 2>/dev/null; then
         RECAP_NAG="✔ Already patched (prior run)"
         success "Subscription nag already patched"
     else
@@ -783,9 +788,11 @@ else
         cp "$JS_FOUND" "${JS_FOUND}.bak.$(date +%s)"
         _log "[P6] Backup created"
 
-        # Patch 1: subscription_check call site
+        # Patch 1: subscription_check call site (PBS 2.x) and checked_command (PBS 3.x)
         sed -i 's/\.subscription_check(/.void_check(/g' "$JS_FOUND" 2>/dev/null || true
-        _log "[P6] Patch 1 applied (subscription_check)"
+        sed -i 's/checked_command:function(orig_cmd)/checked_command:function(orig_cmd){return orig_cmd();} \/\//g' "$JS_FOUND" 2>/dev/null || true
+        sed -i 's/checked_command: function(orig_cmd)/checked_command: function(orig_cmd) { return orig_cmd(); } \/\//g' "$JS_FOUND" 2>/dev/null || true
+        _log "[P6] Patch 1 applied (subscription_check + checked_command)"
 
         # Patch 2: Ext.Msg.show nag — try multiple spacing variants
         sed -i "s|Ext\.Msg\.show({title:gettext('No valid sub|void({/*|g" "$JS_FOUND" 2>/dev/null || true
@@ -794,7 +801,7 @@ else
         _log "[P6] Patch 2 applied (Ext.Msg.show)"
 
         # Verify
-        if grep -q 'void_check\|void({' "$JS_FOUND" 2>/dev/null; then
+        if grep -qE 'void_check|void\(\{|checked_command.*return orig_cmd' "$JS_FOUND" 2>/dev/null; then
             systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
             RECAP_NAG="✔ Patched"
             success "Subscription nag patched"
