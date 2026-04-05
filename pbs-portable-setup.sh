@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.28
+# Proxmox Backup Server Portable Setup Script v0.29
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -16,7 +16,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo ""
 echo "=== PBS Setup started: $(date) ==="
 
-SCRIPT_VERSION="v0.28"
+SCRIPT_VERSION="v0.29"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -758,6 +758,7 @@ systemctl start --no-block netbird-tty-refresh.service 2>/dev/null || true
 # =============================================================================
 info "Phase 6: Subscription nag removal"
 RECAP_NAG=""
+set +e  # Phase 6 uses python exit codes — disable errexit temporarily
 
 # Write the patcher as a temp script — avoids all shell quoting/expansion issues
 cat > /tmp/pbs-nag-patch.py << 'NAGPY'
@@ -797,8 +798,10 @@ for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js \
           /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
     [[ -f "$JS" ]] || continue
     cp "$JS" "${JS}.bak.$(date +%s)"
+    set +e
     python3 /tmp/pbs-nag-patch.py "$JS"
     RC=$?
+    set -e
     case $RC in
         0) systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
            RECAP_NAG="✔ Patched"
@@ -807,15 +810,16 @@ for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js \
            success "Subscription nag already patched" ;;
         1) LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
            [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
-           RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
-           warn "Nag patch: pattern not found" ;;
+           RECAP_NAG="⚠ Pattern not matched — JS may have changed"
+           warn "Nag patch: pattern not found — check /var/log/pbs-setup.log" ;;
         *) RECAP_NAG="⚠ Patch script error (rc=$RC)"
-           warn "Nag patch: unexpected error" ;;
+           warn "Nag patch: unexpected error (rc=$RC)" ;;
     esac
     break
 done
 [[ -z "$RECAP_NAG" ]] && RECAP_NAG="⚠ JS file not found"
 rm -f /tmp/pbs-nag-patch.py
+set -e  # Re-enable errexit
 
 # =============================================================================
 # PHASE 7 — Networking (VM-safe)
