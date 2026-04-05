@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.14
+# Proxmox Backup Server Portable Setup Script v0.16
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.14"
+SCRIPT_VERSION="v0.16"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -431,28 +431,52 @@ else
     RECAP_CLOUDFLARED="✔ Installed"
 fi
 
-# Ask for Cloudflare tunnel token — works whether freshly installed or already present
-echo
-info "Cloudflare Tunnel Token (leave blank to skip):"
-info "  → Get your token at: \e[1;33mhttps://one.dash.cloudflare.com\e[0m"
-info "  → Zero Trust → Networks → Tunnels → Create tunnel → Choose connector → Copy token"
-read -p "  Cloudflare Token: " CF_TOKEN
-echo
-if [[ -n "$CF_TOKEN" ]]; then
-    info "Installing Cloudflare tunnel service..."
-    cloudflared service install "$CF_TOKEN" 2>/dev/null || \
-        cloudflared service install --token "$CF_TOKEN" 2>/dev/null || true
-    sleep 3
-    if systemctl is-active --quiet cloudflared 2>/dev/null; then
-        success "Cloudflare tunnel service active"
-        RECAP_CLOUDFLARED="✔ Tunnel active"
+# Cloudflare tunnel token setup
+CF_TUNNEL_ACTIVE=false
+systemctl is-active --quiet cloudflared 2>/dev/null && CF_TUNNEL_ACTIVE=true
+
+if $CF_TUNNEL_ACTIVE; then
+    echo
+    success "Cloudflare tunnel is already running"
+    read -p "  Re-enter a new Cloudflare token? (y/N) " -n1 -r; echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        CF_PROMPT=true
     else
-        warn "Cloudflare tunnel installed but service not yet active — check: systemctl status cloudflared"
-        RECAP_CLOUDFLARED="⚠ Installed, service not active (check token)"
+        info "Keeping existing tunnel — skipping token prompt"
+        RECAP_CLOUDFLARED="✔ Tunnel already active (unchanged)"
+        CF_PROMPT=false
     fi
 else
-    info "No token provided — skipping tunnel setup"
-    RECAP_CLOUDFLARED="${RECAP_CLOUDFLARED} (no token — run: cloudflared service install <token>)"
+    CF_PROMPT=true
+fi
+
+if $CF_PROMPT; then
+    echo
+    info "Cloudflare Tunnel Token (leave blank to skip):"
+    info "  → Get your token at: \e[1;33mhttps://one.dash.cloudflare.com\e[0m"
+    info "  → Zero Trust → Networks → Tunnels → Create tunnel → Choose connector → Copy token"
+    read -p "  Cloudflare Token: " CF_TOKEN
+    echo
+    if [[ -n "$CF_TOKEN" ]]; then
+        info "Installing Cloudflare tunnel service..."
+        # Stop existing service cleanly before re-installing token
+        systemctl stop cloudflared 2>/dev/null || true
+        cloudflared service uninstall 2>/dev/null || true
+        sleep 2
+        cloudflared service install "$CF_TOKEN" 2>/dev/null || \
+            cloudflared service install --token "$CF_TOKEN" 2>/dev/null || true
+        sleep 3
+        if systemctl is-active --quiet cloudflared 2>/dev/null; then
+            success "Cloudflare tunnel service active"
+            RECAP_CLOUDFLARED="✔ Tunnel active"
+        else
+            warn "Cloudflare tunnel installed but not yet active — check: systemctl status cloudflared"
+            RECAP_CLOUDFLARED="⚠ Installed, service not active (check token)"
+        fi
+    else
+        info "No token provided — skipping tunnel setup"
+        RECAP_CLOUDFLARED="${RECAP_CLOUDFLARED} (no token — run: cloudflared service install <token>)"
+    fi
 fi
 
 # =============================================================================
@@ -461,15 +485,39 @@ fi
 info "Phase 5: Security + dynamic access"
 
 # UFW
+# IMPORTANT: Add all rules BEFORE enabling UFW to prevent locking out the
+# current SSH session. Always whitelist the current client IP first.
+
+# Detect current SSH client IP from the active session
+CURRENT_SSH_IP=$(echo "$SSH_CLIENT" | awk "{print \$1}")
+[[ -z "$CURRENT_SSH_IP" ]] && CURRENT_SSH_IP=$(who am i 2>/dev/null | grep -oP "\(\K[^)]+)" | head -1)
+[[ -z "$CURRENT_SSH_IP" ]] && CURRENT_SSH_IP=$(ss -tnp 2>/dev/null | grep ":22 " | grep ESTAB | awk "{print \$5}" | cut -d: -f1 | grep -v "^$" | head -1)
+
+# Add all rules first, then enable — never the other way around
+ufw --force reset 2>/dev/null || true
+ufw default deny incoming 2>/dev/null || true
+ufw default allow outgoing 2>/dev/null || true
+
+# Always allow current SSH session IP (prevents lockout)
+if [[ -n "$CURRENT_SSH_IP" ]]; then
+    ufw allow from "$CURRENT_SSH_IP" to any port 22 comment "Active SSH session"
+    info "UFW: whitelisted current SSH client: $CURRENT_SSH_IP"
+fi
+
+# Always allow SSH on port 22 as a fallback safety rule
+ufw allow 22/tcp comment "SSH fallback"
+
 if $NETBIRD_CONNECTED; then
-    ufw --force enable
     ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH"
     ufw allow from 100.64.0.0/10 to any port $PBS_PORT comment "Netbird PBS"
-    ufw reload
     RECAP_FIREWALL="✔ UFW enabled (Netbird + LAN rules)"
 else
-    RECAP_FIREWALL="⚠ Skipped — Netbird not connected"
+    RECAP_FIREWALL="⚠ UFW enabled (SSH only — Netbird not connected)"
 fi
+
+# NOW enable — all rules are already in place
+ufw --force enable
+ufw reload
 
 # ufw-lan-refresh
 cat > /usr/local/bin/ufw-lan-refresh <<'UFWREF'
