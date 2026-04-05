@@ -1,14 +1,13 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.29
+# Proxmox Backup Server Portable Setup Script v0.30
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
 # Run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh)"
 # =============================================================================
 
-# FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
-set -o pipefail
+# Note: pipefail intentionally disabled — interactive setup script uses explicit error handling
 
 # Tee all output to a log file — check /var/log/pbs-setup.log if disconnected
 LOG_FILE="/var/log/pbs-setup.log"
@@ -16,7 +15,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo ""
 echo "=== PBS Setup started: $(date) ==="
 
-SCRIPT_VERSION="v0.29"
+SCRIPT_VERSION="v0.30"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -229,7 +228,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -q htop curl git jq wget ufw a
 # Now wait for the background upgrade to complete
 if [[ -n "$APT_UPGRADE_PID" ]]; then
     info "Waiting for system upgrade to finish..."
-    wait "$APT_UPGRADE_PID" 2>/dev/null
+    wait "$APT_UPGRADE_PID" 2>/dev/null || true
     APT_RC=$?
     if [[ $APT_RC -eq 0 ]]; then
         DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -q > /dev/null 2>&1 || true
@@ -758,7 +757,6 @@ systemctl start --no-block netbird-tty-refresh.service 2>/dev/null || true
 # =============================================================================
 info "Phase 6: Subscription nag removal"
 RECAP_NAG=""
-set +e  # Phase 6 uses python exit codes — disable errexit temporarily
 
 # Write the patcher as a temp script — avoids all shell quoting/expansion issues
 cat > /tmp/pbs-nag-patch.py << 'NAGPY'
@@ -798,10 +796,8 @@ for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js \
           /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
     [[ -f "$JS" ]] || continue
     cp "$JS" "${JS}.bak.$(date +%s)"
-    set +e
     python3 /tmp/pbs-nag-patch.py "$JS"
     RC=$?
-    set -e
     case $RC in
         0) systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
            RECAP_NAG="✔ Patched"
@@ -819,7 +815,6 @@ for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js \
 done
 [[ -z "$RECAP_NAG" ]] && RECAP_NAG="⚠ JS file not found"
 rm -f /tmp/pbs-nag-patch.py
-set -e  # Re-enable errexit
 
 # =============================================================================
 # PHASE 7 — Networking (VM-safe)
