@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.30
+# Proxmox Backup Server Portable Setup Script v0.31
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -9,13 +9,17 @@
 
 # Note: pipefail intentionally disabled — interactive setup script uses explicit error handling
 
-# Tee all output to a log file — check /var/log/pbs-setup.log if disconnected
+# Log all output to file using a named pipe — reliable across all bash invocations
 LOG_FILE="/var/log/pbs-setup.log"
-exec > >(tee -a "$LOG_FILE") 2>&1
+PIPE=$(mktemp -u /tmp/pbs-log-XXXXXX)
+mkfifo "$PIPE"
+tee -a "$LOG_FILE" < "$PIPE" &
+TEE_PID=$!
+exec > "$PIPE" 2>&1
 echo ""
 echo "=== PBS Setup started: $(date) ==="
 
-SCRIPT_VERSION="v0.30"
+SCRIPT_VERSION="v0.31"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -866,4 +870,8 @@ info "Next node one-liner:"
 echo "  bash -c \"\$(curl -fsSL $SETUP_SCRIPT_URL)\""
 
 read -p "Reboot now? (y/N): " -n1 -r; echo
+# Close the log pipe cleanly
+exec > /dev/tty 2>&1
+rm -f "$PIPE"
+wait "$TEE_PID" 2>/dev/null || true
 [[ $REPLY =~ ^[Yy]$ ]] && reboot
