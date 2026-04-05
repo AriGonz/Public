@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.10
+# Proxmox Backup Server Portable Setup Script v0.11
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.10"
+SCRIPT_VERSION="v0.11"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -394,6 +394,26 @@ if $NETBIRD_DO_SETUP; then
     fi
 
     [[ $NETBIRD_CONNECTED == true ]] && RECAP_NETBIRD="✔ Connected (${NETBIRD_IP})"
+
+    # --- Netbird SSH support ---
+    if $NETBIRD_CONNECTED; then
+        echo
+        read -p "Enable Netbird SSH access (allows SSH via Netbird network)? (y/N) " -n1 -r; echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            info "Enabling Netbird SSH support..."
+            netbird down 2>/dev/null || true
+            sleep 2
+            netbird up --management-url "$NETBIRD_URL" --allow-server-ssh --enable-ssh-root > /tmp/netbird-ssh.log 2>&1 &
+            sleep 5
+            if netbird status 2>/dev/null | grep -q Connected; then
+                success "Netbird SSH enabled"
+                RECAP_NETBIRD="✔ Connected + SSH enabled (${NETBIRD_IP})"
+            else
+                warn "Netbird SSH restart is still connecting — it should be active shortly"
+                RECAP_NETBIRD="✔ Connected + SSH enabled (reconnecting)"
+            fi
+        fi
+    fi
 fi
 
 # =============================================================================
@@ -401,14 +421,38 @@ fi
 # =============================================================================
 info "Phase 4: Cloudflared"
 if command -v cloudflared >/dev/null 2>&1; then
-    success "Already installed — skipping"
-    RECAP_CLOUDFLARED="✔ Already installed (skipped)"
+    success "cloudflared already installed"
+    RECAP_CLOUDFLARED="✔ Already installed"
 else
     mkdir -p --mode=0755 /usr/share/keyrings
     curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
     echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' > /etc/apt/sources.list.d/cloudflared.list
     apt-get update -qq && apt-get install -y cloudflared
-    RECAP_CLOUDFLARED="✔ Installed (run: cloudflared service install <your-token>)"
+    RECAP_CLOUDFLARED="✔ Installed"
+fi
+
+# Ask for Cloudflare tunnel token — works whether freshly installed or already present
+echo
+info "Cloudflare Tunnel Token (leave blank to skip):"
+info "  → Get your token at: \e[1;33mhttps://one.dash.cloudflare.com\e[0m"
+info "  → Zero Trust → Networks → Tunnels → Create tunnel → Choose connector → Copy token"
+read -p "  Cloudflare Token: " CF_TOKEN
+echo
+if [[ -n "$CF_TOKEN" ]]; then
+    info "Installing Cloudflare tunnel service..."
+    cloudflared service install "$CF_TOKEN" 2>/dev/null || \
+        cloudflared service install --token "$CF_TOKEN" 2>/dev/null || true
+    sleep 3
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
+        success "Cloudflare tunnel service active"
+        RECAP_CLOUDFLARED="✔ Tunnel active"
+    else
+        warn "Cloudflare tunnel installed but service not yet active — check: systemctl status cloudflared"
+        RECAP_CLOUDFLARED="⚠ Installed, service not active (check token)"
+    fi
+else
+    info "No token provided — skipping tunnel setup"
+    RECAP_CLOUDFLARED="${RECAP_CLOUDFLARED} (no token — run: cloudflared service install <token>)"
 fi
 
 # =============================================================================
@@ -592,13 +636,12 @@ RECAP_NAG=""
 for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
     [[ -f "$JS" ]] || continue
     cp "$JS" "${JS}.bak.$(date +%s)"
-    sed -Ezi 's/(Ext\.Msg\.show\(\{\s+title: gettext\(.No valid sub)/void(\{ \/\/\1/g' "$JS"
-    # FIX: verify the patch actually landed — sed exits 0 even if pattern unmatched
+    # Use perl instead of sed -Ezi — sed -z hangs on large JS files
+    perl -i -0pe 's/(Ext\.Msg\.show\(\{[\s\S]*?title:[\s]*gettext\(['\''"]No valid sub)/void({ \/\/ $1/g' "$JS" 2>/dev/null || true
     if grep -q 'void({' "$JS"; then
         systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
         RECAP_NAG="✔ Patched"
     else
-        # Restore backup since patch didn't apply — use the most recent backup
         LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
         [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
         RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
