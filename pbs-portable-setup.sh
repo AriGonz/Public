@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.39
+# Proxmox Backup Server Portable Setup Script v0.40
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -14,7 +14,7 @@ LOG_FILE="/var/log/pbs-setup.log"
 echo "" >> "$LOG_FILE"
 echo "=== PBS Setup started: $(date) ===" | tee -a "$LOG_FILE"
 
-SCRIPT_VERSION="v0.39"
+SCRIPT_VERSION="v0.40"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -37,24 +37,31 @@ warn()    { local m="[⚠] $1"; echo -e "\e[33m${m}\e[0m"; _log "$m"; }
 error()   { local m="[✖] $1"; echo -e "\e[31m${m}\e[0m"; _log "$m"; exit 1; }
 info()    { local m="[i] $1";  echo -e "\e[34m${m}\e[0m"; _log "$m"; }
 
+_recap_row() {
+    local label="$1" value="$2"
+    local padded
+    padded=$(printf "%s" "$value" | awk '{if(length($0)>38) print substr($0,1,38); else printf "%-38s", $0}')
+    printf "\e[34m║  %-20s  %s║\e[0m\n" "$label" "$padded"
+}
+
 print_recap_box() {
     echo
     echo -e "\e[34m╔══════════════════════════════════════════════════════════════╗\e[0m"
     printf  "\e[34m║               PBS PORTABLE SETUP RECAP (%-6s)               ║\e[0m\n" "$SCRIPT_VERSION"
     echo -e "\e[34m╟──────────────────────────────────────────────────────────────╢\e[0m"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Hostname:"     "$RECAP_HOSTNAME"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Domain:"       "$RECAP_DOMAIN"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "SSH Keys:"     "$RECAP_SSH_KEYS"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Repos:"        "$RECAP_REPOS"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Upgrade:"      "$RECAP_UPGRADE"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Guest Agent:"  "$RECAP_GUESTAGENT"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Netbird:"      "$RECAP_NETBIRD"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Cloudflared:"  "$RECAP_CLOUDFLARED"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Firewall:"     "$RECAP_FIREWALL"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "mDNS:"         "$RECAP_MDNS"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "MOTD/Console:" "$RECAP_MOTD"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Nag Removal:"  "$RECAP_NAG"
-    printf "\e[34m║  %-20s  %-37.37s║\e[0m\n" "Networking:"   "$RECAP_NETWORK"
+    _recap_row "Hostname:"     "$RECAP_HOSTNAME"
+    _recap_row "Domain:"       "$RECAP_DOMAIN"
+    _recap_row "SSH Keys:"     "$RECAP_SSH_KEYS"
+    _recap_row "Repos:"        "$RECAP_REPOS"
+    _recap_row "Upgrade:"      "$RECAP_UPGRADE"
+    _recap_row "Guest Agent:"  "$RECAP_GUESTAGENT"
+    _recap_row "Netbird:"      "$RECAP_NETBIRD"
+    _recap_row "Cloudflared:"  "$RECAP_CLOUDFLARED"
+    _recap_row "Firewall:"     "$RECAP_FIREWALL"
+    _recap_row "mDNS:"         "$RECAP_MDNS"
+    _recap_row "MOTD/Console:" "$RECAP_MOTD"
+    _recap_row "Nag Removal:"  "$RECAP_NAG"
+    _recap_row "Networking:"   "$RECAP_NETWORK"
     echo -e "\e[34m╚══════════════════════════════════════════════════════════════╝\e[0m"
 }
 
@@ -653,10 +660,13 @@ EOF
     # --no-block so we do not wait for resolved to fully restart
     systemctl restart --no-block systemd-resolved 2>/dev/null || true
 fi
+# Ensure avahi-daemon is installed (may be missing on minimal installs)
+if ! command -v avahi-daemon >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q avahi-daemon > /dev/null 2>&1 || true
+fi
 systemctl enable avahi-daemon 2>/dev/null || true
-# --no-block prevents hanging if avahi fails — we check status separately
-systemctl restart --no-block avahi-daemon 2>/dev/null || true
-sleep 3
+systemctl restart avahi-daemon 2>/dev/null || true
+sleep 5
 if systemctl is-active --quiet avahi-daemon 2>/dev/null; then
     RECAP_MDNS="✔ ${NEWHOST}.local:$PBS_PORT"
 else
@@ -870,4 +880,12 @@ echo "  bash -c \"\$(curl -fsSL $SETUP_SCRIPT_URL)\""
 
 read -p "Reboot now? (y/N): " -n1 -r; echo
 _log "[MILESTONE] Script completed successfully"
-[[ $REPLY =~ ^[Yy]$ ]] && reboot
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1; then
+        info "Waiting for apt/dpkg to finish before reboot..."
+        while pgrep -x apt-get >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1; do
+            sleep 2
+        done
+    fi
+    systemctl reboot
+fi
