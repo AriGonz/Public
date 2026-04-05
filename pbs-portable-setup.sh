@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.17
+# Proxmox Backup Server Portable Setup Script v0.19
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.17"
+SCRIPT_VERSION="v0.19"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -130,8 +130,10 @@ EOF
     info "Debian repos added to sources.list"
 fi
 
-apt-get update -qq
-apt-cache show htop >/dev/null 2>&1 || error "Repository verification failed"
+# Start apt-get update in background immediately — will be used in Phase 2
+info "Starting package list update in background..."
+apt-get update -qq > /tmp/apt-update.log 2>&1 &
+APT_UPDATE_PID=$!
 RECAP_REPOS="✔ Configured (${CODENAME})"
 
 # =============================================================================
@@ -198,14 +200,40 @@ EOF
 RECAP_HOSTNAME="✔ $NEWHOST"
 RECAP_DOMAIN="✔ $USER_DOMAIN"
 
+# Wait for background apt-get update to finish before upgrading
+if [[ -n "$APT_UPDATE_PID" ]]; then
+    info "Waiting for package list update to complete..."
+    wait "$APT_UPDATE_PID" 2>/dev/null || true
+    apt-cache show htop >/dev/null 2>&1 || error "Repository verification failed"
+fi
+
+# Start full-upgrade in background now — user will be answering prompts while this runs
+info "Starting system upgrade in background..."
+DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y -q > /tmp/apt-upgrade.log 2>&1 &
+APT_UPGRADE_PID=$!
+
 # =============================================================================
 # PHASE 2 — Upgrade + tools
 # =============================================================================
-info "Phase 2: Upgrade + tools"
-# FIX: avahi-daemon included here only (removed duplicate install in Phase 5)
-apt-get full-upgrade -y && apt-get autoremove -y
-apt-get install -y htop curl git jq wget ufw avahi-daemon
-RECAP_UPGRADE="✔ Packages upgraded"
+info "Phase 2: Upgrade + tools (running in background — installing tools now)"
+# Install tools immediately — upgrade finishes in parallel
+DEBIAN_FRONTEND=noninteractive apt-get install -y -q htop curl git jq wget ufw avahi-daemon > /tmp/apt-install.log 2>&1
+
+# Now wait for the background upgrade to complete
+if [[ -n "$APT_UPGRADE_PID" ]]; then
+    info "Waiting for system upgrade to finish..."
+    wait "$APT_UPGRADE_PID" 2>/dev/null
+    APT_RC=$?
+    if [[ $APT_RC -eq 0 ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -q > /dev/null 2>&1 || true
+        RECAP_UPGRADE="✔ Packages upgraded"
+    else
+        warn "Background upgrade may have had issues — check /tmp/apt-upgrade.log"
+        RECAP_UPGRADE="⚠ Upgrade completed with warnings (see /tmp/apt-upgrade.log)"
+    fi
+else
+    RECAP_UPGRADE="✔ Packages upgraded"
+fi
 
 # =============================================================================
 # PHASE 2.5 — QEMU Guest Agent (VM-specific)
@@ -488,32 +516,52 @@ info "Phase 5: Security + dynamic access"
 # IMPORTANT: Add all rules BEFORE enabling UFW to prevent locking out the
 # current SSH session. Always whitelist the current client IP first.
 
-# Detect current SSH client IP — try multiple methods in order of reliability
-# Method 1: $SSH_CLIENT env var (set by sshd, most reliable)
-CURRENT_SSH_IP=$(echo "$SSH_CLIENT" | awk '{print $1}' 2>/dev/null)
-# Method 2: ss to find established connection on port 22
+# Detect current SSH client IP — debug all methods
+info "--- SSH IP Detection Debug ---"
+info "SSH_CLIENT env : [${SSH_CLIENT}]"
+info "SSH_CONNECTION : [${SSH_CONNECTION}]"
+info "who am i       : [$(who am i 2>/dev/null)]"
+info "ss port 22     : [$(ss -tnp 2>/dev/null | grep ":22 ")]"
+info "lastlog        : [$(lastlog -u root 2>/dev/null | tail -1)]"
+info "netstat        : [$(netstat -tnp 2>/dev/null | grep ":22 " | grep ESTABLISHED | head -3)]"
+info "w output       : [$(w -h 2>/dev/null | head -3)]"
+info "-----------------------------"
+
+# Method 1: $SSH_CONNECTION (more reliable than SSH_CLIENT in subshells)
+CURRENT_SSH_IP=$(echo "$SSH_CONNECTION" | awk '{print $1}' 2>/dev/null)
+# Method 2: $SSH_CLIENT
 if [[ -z "$CURRENT_SSH_IP" ]]; then
-    CURRENT_SSH_IP=$(ss -tnp 2>/dev/null | awk '/ESTAB.*:22/{split($5,a,":");print a[1]}' | grep -v "^$" | head -1)
+    CURRENT_SSH_IP=$(echo "$SSH_CLIENT" | awk '{print $1}' 2>/dev/null)
 fi
-# Method 3: last resort — check who is logged in
+# Method 3: ss established on port 22 — handle both addr:port and [addr]:port formats
+if [[ -z "$CURRENT_SSH_IP" ]]; then
+    CURRENT_SSH_IP=$(ss -tnp 2>/dev/null | grep "ESTAB" | grep ":22 " | awk '{print $5}' | sed 's/:[0-9]*$//; s/\[//g; s/\]//g' | grep -v "^$" | head -1)
+fi
+# Method 4: who am i
 if [[ -z "$CURRENT_SSH_IP" ]]; then
     CURRENT_SSH_IP=$(who am i 2>/dev/null | awk -F"[()]" '{print $2}' | grep -v "^$" | head -1)
 fi
-info "Detected SSH client IP: ${CURRENT_SSH_IP:-unknown}"
+# Method 5: w command
+if [[ -z "$CURRENT_SSH_IP" ]]; then
+    CURRENT_SSH_IP=$(w -h 2>/dev/null | awk '{print $3}' | grep -E "^[0-9]+\." | head -1)
+fi
+info "Detected SSH client IP: ${CURRENT_SSH_IP:-UNKNOWN — will use fallback open rule}"
 
 # Add all rules first, then enable — never the other way around
 ufw --force reset 2>/dev/null || true
 ufw default deny incoming 2>/dev/null || true
 ufw default allow outgoing 2>/dev/null || true
 
-# Always allow current SSH session IP (prevents lockout)
+# UNCONDITIONAL: always allow port 22 from anywhere — absolute lockout prevention
+ufw allow 22/tcp comment "SSH always-open safety rule"
+
+# Additionally whitelist the specific SSH client IP if detected
 if [[ -n "$CURRENT_SSH_IP" ]]; then
     ufw allow from "$CURRENT_SSH_IP" to any port 22 comment "Active SSH session"
     info "UFW: whitelisted current SSH client: $CURRENT_SSH_IP"
+else
+    warn "Could not detect SSH client IP — port 22 open to all (safety fallback)"
 fi
-
-# Always allow SSH on port 22 as a fallback safety rule
-ufw allow 22/tcp comment "SSH fallback"
 
 if $NETBIRD_CONNECTED; then
     ufw allow from 100.64.0.0/10 to any port 22 comment "Netbird SSH"
