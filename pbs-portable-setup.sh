@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.33
+# Proxmox Backup Server Portable Setup Script v0.35
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -14,7 +14,7 @@ LOG_FILE="/var/log/pbs-setup.log"
 echo "" >> "$LOG_FILE"
 echo "=== PBS Setup started: $(date) ===" | tee -a "$LOG_FILE"
 
-SCRIPT_VERSION="v0.33"
+SCRIPT_VERSION="v0.35"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -758,42 +758,60 @@ systemctl start --no-block netbird-tty-refresh.service 2>/dev/null || true
 info "Phase 6: Subscription nag removal"
 RECAP_NAG=""
 
-for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js           /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
-    [[ -f "$JS" ]] || continue
+_log "[P6] Checking JS files..."
+JS_FOUND=""
+for JS in /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js /usr/share/javascript/proxmox-backup/proxmoxbackuplib.js; do
+    if [[ -f "$JS" ]]; then
+        JS_FOUND="$JS"
+        _log "[P6] Found: $JS"
+        break
+    else
+        _log "[P6] Not found: $JS"
+    fi
+done
 
-    # Check if already patched
-    if grep -q 'void_check\|NoMoreNagging' "$JS" 2>/dev/null; then
+if [[ -z "$JS_FOUND" ]]; then
+    RECAP_NAG="⚠ JS file not found"
+    warn "Nag patch: no JS file found"
+else
+    _log "[P6] Checking if already patched..."
+    if grep -q 'void_check\|NoMoreNagging' "$JS_FOUND" 2>/dev/null; then
         RECAP_NAG="✔ Already patched (prior run)"
         success "Subscription nag already patched"
-        break
-    fi
-
-    cp "$JS" "${JS}.bak.$(date +%s)"
-
-    # Patch 1: replace .subscription_check( call with .void_check(
-    sed -i 's/\.subscription_check(/.void_check(/g' "$JS"
-
-    # Patch 2: disable Ext.Msg.show nag popup
-    # Use | as delimiter to avoid escaping issues with /
-    sed -i "s|Ext\.Msg\.show({title:gettext('No valid sub|void({ //Ext.Msg.show({title:gettext('No valid sub|g" "$JS"
-    # Also handle with spaces around the colon
-    sed -i "s|Ext\.Msg\.show({ title: gettext('No valid sub|void({ //Ext.Msg.show({ title: gettext('No valid sub|g" "$JS"
-
-    # Verify at least one patch landed
-    if grep -q 'void_check\|void({' "$JS" 2>/dev/null; then
-        systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
-        RECAP_NAG="✔ Patched"
-        success "Subscription nag patched"
     else
-        # Restore backup — nothing changed
-        LATEST_BAK=$(ls -1t "${JS}.bak."* 2>/dev/null | head -1)
-        [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS" || true
-        RECAP_NAG="⚠ Pattern not matched — JS may have changed in this PBS version"
-        warn "Nag patch: pattern not found"
+        _log "[P6] Not yet patched — scanning for patterns..."
+        # Log what patterns exist in the file
+        grep -o 'subscription_check\|No valid sub\|Ext\.Msg\.show' "$JS_FOUND" 2>/dev/null | sort -u | while read -r p; do _log "[P6] Found pattern: $p"; done
+
+        cp "$JS_FOUND" "${JS_FOUND}.bak.$(date +%s)"
+        _log "[P6] Backup created"
+
+        # Patch 1: subscription_check call site
+        sed -i 's/\.subscription_check(/.void_check(/g' "$JS_FOUND" 2>/dev/null || true
+        _log "[P6] Patch 1 applied (subscription_check)"
+
+        # Patch 2: Ext.Msg.show nag — try multiple spacing variants
+        sed -i "s|Ext\.Msg\.show({title:gettext('No valid sub|void({/*|g" "$JS_FOUND" 2>/dev/null || true
+        sed -i "s|Ext\.Msg\.show({ title: gettext('No valid sub|void({/*|g" "$JS_FOUND" 2>/dev/null || true
+        sed -i 's|Ext\.Msg\.show(\s*{[^}]*title:\s*gettext.*No valid sub||g' "$JS_FOUND" 2>/dev/null || true
+        _log "[P6] Patch 2 applied (Ext.Msg.show)"
+
+        # Verify
+        if grep -q 'void_check\|void({' "$JS_FOUND" 2>/dev/null; then
+            systemctl restart proxmox-backup-proxy.service 2>/dev/null || true
+            RECAP_NAG="✔ Patched"
+            success "Subscription nag patched"
+            _log "[P6] Patch verified successfully"
+        else
+            LATEST_BAK=$(ls -1t "${JS_FOUND}.bak."* 2>/dev/null | head -1)
+            [[ -n "$LATEST_BAK" ]] && cp "$LATEST_BAK" "$JS_FOUND" || true
+            RECAP_NAG="⚠ Pattern not matched — may already be clean or JS changed"
+            warn "Nag patch: pattern not matched (see /var/log/pbs-setup.log for details)"
+            _log "[P6] Patch verification failed — restored backup"
+        fi
     fi
-    break
-done
-[[ -z "$RECAP_NAG" ]] && RECAP_NAG="⚠ JS file not found"
+fi
+_log "[P6] Done. RECAP_NAG=$RECAP_NAG"
 
 # =============================================================================
 # PHASE 7 — Networking (VM-safe)
