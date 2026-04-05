@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.05
+# Proxmox Backup Server Portable Setup Script v0.06
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.05"
+SCRIPT_VERSION="v0.06"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -100,18 +100,17 @@ if ! grep -q "pbs-no-subscription" /etc/apt/sources.list* 2>/dev/null; then
     echo "deb http://download.proxmox.com/debian/pbs $CODENAME pbs-no-subscription" >> /etc/apt/sources.list
 fi
 
-# Only add Debian repos if neither .list nor modern .sources format already has them
-DEBIAN_IN_LIST=$(grep -qs "deb.debian.org" /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null && echo yes || echo no)
-DEBIAN_IN_SOURCES=$(grep -rqs "deb.debian.org" /etc/apt/sources.list.d/*.sources 2>/dev/null && echo yes || echo no)
-if [[ "$DEBIAN_IN_LIST" == "no" && "$DEBIAN_IN_SOURCES" == "no" ]]; then
+# Only add Debian repos if not already present in ANY apt source file
+if grep -rqs "deb.debian.org" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    info "Debian repos already present — skipping"
+else
     cat <<EOF >> /etc/apt/sources.list
 
 deb http://deb.debian.org/debian $CODENAME main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian $CODENAME-updates main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security $CODENAME-security main contrib non-free non-free-firmware
 EOF
-elif [[ "$DEBIAN_IN_SOURCES" == "yes" ]]; then
-    info "Debian repos already present in .sources format — skipping legacy deb lines"
+    info "Debian repos added to sources.list"
 fi
 
 apt-get update -qq
@@ -259,7 +258,7 @@ if $NETBIRD_DO_SETUP; then
         netbird up --management-url "$NETBIRD_URL" > /tmp/netbird.log 2>&1 &
         sleep 8
         # Try to extract a device-flow URL (contains a user code to enter)
-        AUTH_URL=$(grep -o 'https://[^ ]*' /tmp/netbird.log | grep -E 'auth|device|login|activate' | head -1)
+        AUTH_URL=$(grep -oP 'https://\S+' /tmp/netbird.log | grep -Ev '\.(png|svg|js|css)' | grep -E 'auth|device|login|activate|verify|connect' | head -1)
         USER_CODE=$(grep -oP '(?i)code[[:space:]]*:[[:space:]]*\K[A-Z0-9]{4,}' /tmp/netbird.log | head -1)
         echo
         echo -e "  \e[1;33m┌──────────────────────────────────────────────────────────────┐\e[0m"
@@ -284,15 +283,28 @@ if $NETBIRD_DO_SETUP; then
     }
 
     if [[ -n "$NETBIRD_SETUP_KEY" ]]; then
-        # Key-based auth — non-interactive
+        # Key-based auth — run in background, daemon needs time to register
         info "Using setup key to authenticate..."
-        netbird up --management-url "$NETBIRD_URL" --setup-key "$NETBIRD_SETUP_KEY" > /tmp/netbird.log 2>&1
-        sleep 5
-        # Check if key auth worked before deciding to fall back
-        if ! netbird status 2>/dev/null | grep -q Connected; then
+        netbird up --management-url "$NETBIRD_URL" --setup-key "$NETBIRD_SETUP_KEY" > /tmp/netbird.log 2>&1 &
+        # Wait up to 30s for key-based connection (longer than browser — no human delay)
+        info "Waiting for setup key to connect (up to 30s)..."
+        for i in {1..15}; do
+            sleep 2
+            if netbird status 2>/dev/null | grep -q Connected; then
+                NETBIRD_CONNECTED=true
+                NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+                success "Netbird connected via setup key! ($NETBIRD_IP)"
+                break
+            fi
+            echo -n "."
+        done
+        echo
+        # If key did not connect, fall back to browser auth
+        if ! $NETBIRD_CONNECTED; then
             warn "Setup key did not connect — falling back to browser auth."
             info "  → You can generate a valid key at: \e[1;33m${NETBIRD_URL}/peers\e[0m"
             netbird down 2>/dev/null || true
+            sleep 2
             _netbird_browser_auth
             NETBIRD_SETUP_KEY=""  # clear so browser confirmation loop runs below
         fi
@@ -301,19 +313,21 @@ if $NETBIRD_DO_SETUP; then
         _netbird_browser_auth
     fi
 
-    # --- Wait for connection ---
-    info "Waiting for Netbird to connect..."
-    for i in {1..15}; do
-        sleep 2
-        if netbird status 2>/dev/null | grep -q Connected; then
-            NETBIRD_CONNECTED=true
-            NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
-            success "Netbird connected! ($NETBIRD_IP)"
-            break
-        fi
-        echo -n "."
-    done
-    echo
+    # --- Wait for connection (browser auth path only — key path has its own loop) ---
+    if ! $NETBIRD_CONNECTED; then
+        info "Waiting for Netbird to connect..."
+        for i in {1..15}; do
+            sleep 2
+            if netbird status 2>/dev/null | grep -q Connected; then
+                NETBIRD_CONNECTED=true
+                NETBIRD_IP=$(ip -4 addr show wt0 2>/dev/null | grep -oP '(?<=inet\s)100\.[0-9.]+\b' | head -1)
+                success "Netbird connected! ($NETBIRD_IP)"
+                break
+            fi
+            echo -n "."
+        done
+        echo
+    fi
 
     # --- If still not connected, prompt user to confirm browser auth ---
     if ! $NETBIRD_CONNECTED && [[ -z "$NETBIRD_SETUP_KEY" ]]; then
