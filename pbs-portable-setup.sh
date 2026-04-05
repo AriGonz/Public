@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox Backup Server Portable Setup Script v0.16
+# Proxmox Backup Server Portable Setup Script v0.17
 # Fully portable PBS node (VM-friendly): DHCP + Netbird + Cloudflared + mDNS
 # Safe console/TTY — no blank screen. Idempotent — safe to re-run.
 #
@@ -10,7 +10,7 @@
 # FIX: pipefail so piped commands (curl | sh, curl | tee) fail visibly
 set -o pipefail
 
-SCRIPT_VERSION="v0.16"
+SCRIPT_VERSION="v0.17"
 SETUP_SCRIPT_URL="https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pbs-portable-setup.sh"
 
 SSH_KEYS=(
@@ -488,10 +488,18 @@ info "Phase 5: Security + dynamic access"
 # IMPORTANT: Add all rules BEFORE enabling UFW to prevent locking out the
 # current SSH session. Always whitelist the current client IP first.
 
-# Detect current SSH client IP from the active session
-CURRENT_SSH_IP=$(echo "$SSH_CLIENT" | awk "{print \$1}")
-[[ -z "$CURRENT_SSH_IP" ]] && CURRENT_SSH_IP=$(who am i 2>/dev/null | grep -oP "\(\K[^)]+)" | head -1)
-[[ -z "$CURRENT_SSH_IP" ]] && CURRENT_SSH_IP=$(ss -tnp 2>/dev/null | grep ":22 " | grep ESTAB | awk "{print \$5}" | cut -d: -f1 | grep -v "^$" | head -1)
+# Detect current SSH client IP — try multiple methods in order of reliability
+# Method 1: $SSH_CLIENT env var (set by sshd, most reliable)
+CURRENT_SSH_IP=$(echo "$SSH_CLIENT" | awk '{print $1}' 2>/dev/null)
+# Method 2: ss to find established connection on port 22
+if [[ -z "$CURRENT_SSH_IP" ]]; then
+    CURRENT_SSH_IP=$(ss -tnp 2>/dev/null | awk '/ESTAB.*:22/{split($5,a,":");print a[1]}' | grep -v "^$" | head -1)
+fi
+# Method 3: last resort — check who is logged in
+if [[ -z "$CURRENT_SSH_IP" ]]; then
+    CURRENT_SSH_IP=$(who am i 2>/dev/null | awk -F"[()]" '{print $2}' | grep -v "^$" | head -1)
+fi
+info "Detected SSH client IP: ${CURRENT_SSH_IP:-unknown}"
 
 # Add all rules first, then enable — never the other way around
 ufw --force reset 2>/dev/null || true
@@ -528,8 +536,10 @@ LOG=/var/log/ufw-lan-refresh.log
 echo "$(date) - started" >> $LOG
 for i in {1..12}; do ip addr show vmbr0 | grep -q "inet " && break; sleep 5; done
 SUBNETS=()
-for br in vmbr{0..3}; do
-    IP=$(ip -4 addr show $br 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+')
+# Scan all interfaces — not just vmbr bridges (VMs may use nic0, eth0, ens*, etc.)
+for iface in $(ip -4 addr show 2>/dev/null | awk '/^[0-9]+:/{iface=$2} /inet /{gsub(":","",iface); print iface}'); do
+    [[ "$iface" == "lo" || "$iface" == "wt0" || "$iface" == "netbird0" ]] && continue
+    IP=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+' | head -1)
     [[ -n $IP ]] || continue
     SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_network('$IP/24', strict=False))" 2>/dev/null || echo "${IP%.*}.0/24")
     [[ $SUBNET != 100.64* ]] && SUBNETS+=("$SUBNET")
@@ -605,10 +615,13 @@ cat > /etc/update-motd.d/99-portable-pbs <<'MOTD'
 : ${DOMAIN:=local} ${PBS_PORT:=8007} ${HOSTNAME:=pbs}
 echo "=== Proxmox Backup Server — $HOSTNAME ==="
 echo "Hostname   : https://$HOSTNAME:$PBS_PORT $(curl -sk --max-time 1 https://$HOSTNAME:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
-echo "DHCP IPs:"
-for br in vmbr{0..3}; do
-    IP=$(ip -4 addr show $br 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+')
-    [[ -n $IP ]] && echo "  $br : https://$IP:$PBS_PORT $(curl -sk --max-time 1 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
+echo "IPs:"
+# Scan all interfaces — bridges (vmbr*) and regular NICs (nic*, eth*, ens*, enp*)
+for iface in $(ip -4 addr show 2>/dev/null | awk '/^[0-9]+:/{iface=$2} /inet /{gsub(":","",iface); print iface}'); do
+    # Skip loopback and Netbird tunnel
+    [[ "$iface" == "lo" || "$iface" == "wt0" || "$iface" == "netbird0" ]] && continue
+    IP=$(ip -4 addr show "$iface" 2>/dev/null | grep -oP '(?<=inet\s)[0-9.]+' | head -1)
+    [[ -n $IP ]] && echo "  $iface : https://$IP:$PBS_PORT $(curl -sk --max-time 1 https://$IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "(Not reachable)")"
 done
 NB_IP=$({ ip -4 addr show wt0 2>/dev/null || ip -4 addr show netbird0 2>/dev/null; } | grep -oP '(?<=inet\s)100\.[0-9.]+' | cut -d/ -f1)
 echo "Netbird    : ${NB_IP:-Disconnected} $([[ -n $NB_IP ]] && curl -sk --max-time 1 https://$NB_IP:$PBS_PORT >/dev/null && echo "(Active)" || echo "")"
