@@ -12,6 +12,7 @@
 #   bash netbird-troubleshoot.sh --fix-hints
 #
 # Safe: does not modify NetBird state, does not use setup keys, does not join.
+# Script-Revision: 2026-09-04c (/proc process check + bash watchdog status timeout)
 # =============================================================================
 
 set -u
@@ -55,6 +56,34 @@ run_sudo() {
   else
     return 127
   fi
+}
+
+
+# Portable timeout (Synology often lacks GNU timeout / it won't kill sudo children)
+run_with_timeout() {
+  local secs="$1"; shift
+  local out_file rc pid watchdog
+  out_file=$(mktemp /tmp/nb-to.XXXXXX 2>/dev/null || echo "/tmp/nb-to.$$")
+  "$@" >"$out_file" 2>&1 &
+  pid=$!
+  (
+    sleep "$secs"
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
+  ) &
+  watchdog=$!
+  wait "$pid" 2>/dev/null
+  rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  cat "$out_file" 2>/dev/null || true
+  rm -f "$out_file" 2>/dev/null || true
+  # 143/137 = terminated by signal; treat as timeout if still running logic needed
+  if [[ $rc -eq 143 || $rc -eq 137 || $rc -eq 9 ]]; then
+    return 124
+  fi
+  return "$rc"
 }
 
 usage() {
@@ -215,24 +244,21 @@ if have netbird; then
   fi
   rm -f /tmp/nb-svc-status.$$ 2>/dev/null || true
 
-  # Process presence (bounded — Synology ps can stall on some hosts)
-  PS_OUT=""
-  if have timeout; then
-    PS_OUT=$(timeout 5 ps 2>/dev/null | grep -i '[n]etbird' || true)
-    if [[ -z "$PS_OUT" ]]; then
-      PS_OUT=$(timeout 5 ps aux 2>/dev/null | grep -i '[n]etbird' || true)
+  # Process presence via /proc (avoid hanging Synology ps)
+  NB_PROCS=""
+  for comm in /proc/[0-9]*/comm; do
+    [[ -r "$comm" ]] || continue
+    if grep -qi 'netbird' "$comm" 2>/dev/null; then
+      pid=$(echo "$comm" | cut -d/ -f3)
+      cmdline=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | head -c 200)
+      NB_PROCS="${NB_PROCS}  pid=$pid ${cmdline:-netbird}\n"
     fi
-  else
-    PS_OUT=$(ps 2>/dev/null | grep -i '[n]etbird' || true)
-    if [[ -z "$PS_OUT" ]]; then
-      PS_OUT=$(ps aux 2>/dev/null | grep -i '[n]etbird' || true)
-    fi
-  fi
-  if [[ -n "$PS_OUT" ]]; then
+  done
+  if [[ -n "$NB_PROCS" ]]; then
     pass "NetBird-related process(es) visible"
-    echo "$PS_OUT" | sed 's/^/  /'
+    printf "%b" "$NB_PROCS"
   else
-    fail "No netbird process found (or ps timed out)"
+    fail "No netbird process found under /proc"
     hint "sudo netbird service start"
   fi
 fi
@@ -240,31 +266,26 @@ fi
 # ──── 4. Client status ───────────────────────────────────────────────────────
 section "4. netbird status"
 STATUS_OUT=""
-STATUS_TIMEOUT=20
+STATUS_TIMEOUT=15
+STATUS_RC=0
 if have netbird; then
-  info "Fetching status (timeout ${STATUS_TIMEOUT}s) — wedged daemons can hang here"
-  if have timeout; then
-    if STATUS_OUT=$(run_sudo timeout "$STATUS_TIMEOUT" netbird status 2>&1); then
-      :
-    else
-      rc=$?
-      if [[ $rc -eq 124 ]]; then
-        fail "netbird status timed out after ${STATUS_TIMEOUT}s (daemon likely wedged / gRPC hang)"
-        hint "sudo netbird service stop; sudo rm -rf /var/lib/netbird/*; sudo netbird service start; then re-join with a fresh setup key"
-        STATUS_OUT=""
-      else
-        STATUS_OUT=$(timeout "$STATUS_TIMEOUT" netbird status 2>&1 || true)
-      fi
-    fi
-  else
-    warn "timeout command missing — status may hang; Ctrl+C if it stalls"
-    if STATUS_OUT=$(run_sudo netbird status 2>&1); then
-      :
-    else
-      STATUS_OUT=$(netbird status 2>&1 || true)
+  info "Fetching status (hard timeout ${STATUS_TIMEOUT}s) — wedged daemons hang here"
+  # Prefer non-sudo first (faster); fall back to sudo with portable watchdog
+  STATUS_OUT=$(run_with_timeout "$STATUS_TIMEOUT" netbird status) || STATUS_RC=$?
+  if [[ -z "$STATUS_OUT" || $STATUS_RC -eq 124 ]]; then
+    STATUS_RC=0
+    if [[ ${EUID:-0} -eq 0 ]]; then
+      STATUS_OUT=$(run_with_timeout "$STATUS_TIMEOUT" netbird status) || STATUS_RC=$?
+    elif have sudo; then
+      # -n: never prompt (password prompt in background = silent hang)
+      STATUS_OUT=$(run_with_timeout "$STATUS_TIMEOUT" sudo -n netbird status) || STATUS_RC=$?
     fi
   fi
-  if [[ -n "$STATUS_OUT" ]]; then
+  if [[ $STATUS_RC -eq 124 ]]; then
+    fail "netbird status timed out after ${STATUS_TIMEOUT}s (daemon likely wedged / gRPC hang)"
+    hint "sudo netbird service stop; sudo rm -rf /var/lib/netbird/*; sudo netbird service start; then re-join with a fresh setup key"
+    STATUS_OUT=""
+  elif [[ -n "$STATUS_OUT" ]]; then
     echo "$STATUS_OUT" | sed 's/^/  /'
     echo "$STATUS_OUT" | grep -qi 'Management:.*Connected' && pass "Management Connected" || fail "Management not Connected"
     echo "$STATUS_OUT" | grep -qi 'Signal:.*Connected' && pass "Signal Connected" || fail "Signal not Connected"
