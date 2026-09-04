@@ -215,30 +215,54 @@ if have netbird; then
   fi
   rm -f /tmp/nb-svc-status.$$ 2>/dev/null || true
 
-  # Process presence
-  if ps 2>/dev/null | grep -i '[n]etbird' >/dev/null; then
-    pass "NetBird-related process(es) visible"
-    ps 2>/dev/null | grep -i '[n]etbird' | sed 's/^/  /' || true
-  else
-    # busybox ps variants
-    if ps aux 2>/dev/null | grep -i '[n]etbird' >/dev/null; then
-      pass "NetBird-related process(es) visible"
-      ps aux 2>/dev/null | grep -i '[n]etbird' | sed 's/^/  /' || true
-    else
-      fail "No netbird process found"
-      hint "sudo netbird service start"
+  # Process presence (bounded — Synology ps can stall on some hosts)
+  PS_OUT=""
+  if have timeout; then
+    PS_OUT=$(timeout 5 ps 2>/dev/null | grep -i '[n]etbird' || true)
+    if [[ -z "$PS_OUT" ]]; then
+      PS_OUT=$(timeout 5 ps aux 2>/dev/null | grep -i '[n]etbird' || true)
     fi
+  else
+    PS_OUT=$(ps 2>/dev/null | grep -i '[n]etbird' || true)
+    if [[ -z "$PS_OUT" ]]; then
+      PS_OUT=$(ps aux 2>/dev/null | grep -i '[n]etbird' || true)
+    fi
+  fi
+  if [[ -n "$PS_OUT" ]]; then
+    pass "NetBird-related process(es) visible"
+    echo "$PS_OUT" | sed 's/^/  /'
+  else
+    fail "No netbird process found (or ps timed out)"
+    hint "sudo netbird service start"
   fi
 fi
 
 # ──── 4. Client status ───────────────────────────────────────────────────────
 section "4. netbird status"
 STATUS_OUT=""
+STATUS_TIMEOUT=20
 if have netbird; then
-  if STATUS_OUT=$(run_sudo netbird status 2>&1); then
-    :
+  info "Fetching status (timeout ${STATUS_TIMEOUT}s) — wedged daemons can hang here"
+  if have timeout; then
+    if STATUS_OUT=$(run_sudo timeout "$STATUS_TIMEOUT" netbird status 2>&1); then
+      :
+    else
+      rc=$?
+      if [[ $rc -eq 124 ]]; then
+        fail "netbird status timed out after ${STATUS_TIMEOUT}s (daemon likely wedged / gRPC hang)"
+        hint "sudo netbird service stop; sudo rm -rf /var/lib/netbird/*; sudo netbird service start; then re-join with a fresh setup key"
+        STATUS_OUT=""
+      else
+        STATUS_OUT=$(timeout "$STATUS_TIMEOUT" netbird status 2>&1 || true)
+      fi
+    fi
   else
-    STATUS_OUT=$(netbird status 2>&1 || true)
+    warn "timeout command missing — status may hang; Ctrl+C if it stalls"
+    if STATUS_OUT=$(run_sudo netbird status 2>&1); then
+      :
+    else
+      STATUS_OUT=$(netbird status 2>&1 || true)
+    fi
   fi
   if [[ -n "$STATUS_OUT" ]]; then
     echo "$STATUS_OUT" | sed 's/^/  /'
