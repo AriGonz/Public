@@ -1,15 +1,24 @@
 #!/bin/bash
 # =============================================================================
-# Proxmox NetBird → vmbr10 Bridge Setup Script
-# For Proxmox VE 9.1.1 and later (uses /etc/network/interfaces + ifupdown2)
+# Proxmox NetBird -> vmbr10 Bridge Setup Script
+# For Proxmox VE 8/9 (uses /etc/network/interfaces + ifupdown2)
+#
+# WARNING: Rewrites host networking. Prefer console/IPMI access - ifreload can
+# briefly interrupt management. Backups are written next to interfaces.
+#
+# Prefer running NetBird inside each VM when possible. This bridge pattern is
+# optional and advanced; NetBird may put an IP back on wt0 after restart
+# (re-run this script or pin config if that happens).
 #
 # What it does:
-#   1. Detects the NetBird interface (default: wt0) and its IP/CIDR
-#   2. Moves that IP/CIDR to a new Linux bridge vmbr10
-#   3. Configures vmbr10 so VMs/LXCs can join the SAME NetBird network
-#      (same subnet, host acts as L3 gateway + proxy-ARP)
-# Usage: bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-setup-netbird-vmbr10.sh)"
-# Version .01
+#   1. Detects NetBird interface (default: wt0) and its IP/CIDR
+#   2. Moves that IP/CIDR onto Linux bridge vmbr10
+#   3. Leaves wt0 without an IP so VMs/LXCs on vmbr10 can share the NetBird subnet
+#
+# Prerequisites: NetBird already installed and connected (netbird status).
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/pve-setup-netbird-vmbr10.sh | sudo bash -s
+# Version .02
 # =============================================================================
 
 set -euo pipefail
@@ -51,7 +60,7 @@ echo "✅ NetBird IP detected: $IP_CIDR on $NETBIRD_IF"
 # ----------------------------- Backup ---------------------------------------
 BACKUP="${INTERFACES_FILE}.netbird-bak.$(date +%Y%m%d_%H%M%S)"
 cp "$INTERFACES_FILE" "$BACKUP"
-echo "💾 Backup created → $BACKUP"
+echo "Backup created -> $BACKUP"
 
 # ----------------------------- Write config ---------------------------------
 # Remove any previous vmbr10 block we may have added
@@ -97,7 +106,7 @@ echo "   Bridge $BRIDGE now has $IP_CIDR"
 echo "   Gateway for VMs: ${IP_CIDR%%/*}"
 echo ""
 echo "How to use in VMs / LXCs:"
-echo "   • Network → Bridge: vmbr10"
+echo "   • Network -> Bridge: vmbr10"
 echo "   • Model: VirtIO (recommended)"
 echo "   • IP: static address from the same NetBird range (no conflicts!)"
 echo "   • Gateway: ${IP_CIDR%%/*}"

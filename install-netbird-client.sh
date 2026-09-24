@@ -1,36 +1,38 @@
 #!/usr/bin/env bash
 # =============================================================================
-# NetBird Client Installer (Debian/Ubuntu/Proxmox)
+# NetBird Client Installer (Debian / Ubuntu / Proxmox)
 #
-# Usage (recommended, run as root):
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/install-netbird-client.sh)"
+# Installs the official NetBird apt package and optionally enrolls the peer.
+# Setup keys are accepted only via flag or env — never hard-coded.
+#
+# Recommended (pipe so flags work):
+#   curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/install-netbird-client.sh \
+#     | sudo bash -s -- --no-ui --setup-key "$NETBIRD_SETUP_KEY"
 #
 # Examples:
-#   NETBIRD_MANAGEMENT_URL="https://netbird.arigonz.com" bash install-netbird.sh
-#   bash install-netbird.sh --no-ui
-#   bash install-netbird.sh --no-up
-#   bash install-netbird.sh --management-url "https://netbird.example.com"
+#   sudo bash install-netbird-client.sh --no-ui --no-up
+#   sudo bash install-netbird-client.sh --no-ui --setup-key '....'
+#   sudo NETBIRD_SETUP_KEY='....' bash install-netbird-client.sh --no-ui
+#   sudo bash install-netbird-client.sh --management-url 'https://netbird.arigonz.com' --no-ui
+#
+# Note: bash -c "$(curl ...)" cannot pass --flags; use bash -s -- as above.
 # =============================================================================
 
 set -euo pipefail
 
-# ──── Colors (if terminal supports them) ─────────────────────────────────────
 if [[ -t 1 ]]; then
-  RED=$(tput setaf 1)
-  GREEN=$(tput setaf 2)
-  YELLOW=$(tput setaf 3)
-  BLUE=$(tput setaf 4)
-  RESET=$(tput sgr0)
+  RED=$(tput setaf 1); GREEN=$(tput setaf 2); YELLOW=$(tput setaf 3)
+  BLUE=$(tput setaf 4); RESET=$(tput sgr0)
 else
   RED=""; GREEN=""; YELLOW=""; BLUE=""; RESET=""
 fi
 
-print_info()    { echo "${BLUE}→ $1${RESET}"; }
-print_success() { echo "${GREEN}✓ $1${RESET}"; }
-print_warning() { echo "${YELLOW}⚠ $1${RESET}" >&2; }
-print_error()   { echo "${RED}✗ $1${RESET}" >&2; exit 1; }
+print_info()    { echo "${BLUE}-> $1${RESET}"; }
+print_success() { echo "${GREEN}OK $1${RESET}"; }
+print_warning() { echo "${YELLOW}WARN: $1${RESET}" >&2; }
+print_error()   { echo "${RED}ERR $1${RESET}" >&2; exit 1; }
 
-# ──── Defaults / Config ──────────────────────────────────────────────────────
+# Official NetBird apt repo (https://docs.netbird.io/how-to/installation/linux)
 NETBIRD_KEY_URL="https://pkgs.netbird.io/debian/public.key"
 NETBIRD_REPO_URL="https://pkgs.netbird.io/debian"
 NETBIRD_KEYRING="/usr/share/keyrings/netbird-archive-keyring.gpg"
@@ -38,58 +40,91 @@ NETBIRD_LIST="/etc/apt/sources.list.d/netbird.list"
 
 MANAGEMENT_URL_DEFAULT="https://netbird.arigonz.com"
 MANAGEMENT_URL="${NETBIRD_MANAGEMENT_URL:-$MANAGEMENT_URL_DEFAULT}"
+SETUP_KEY="${NETBIRD_SETUP_KEY:-}"
 
+# Defaults: UI off on Proxmox hosts, on elsewhere (overridable)
 INSTALL_UI=1
 DO_UP=1
+if [[ -d /etc/pve ]] || grep -qi proxmox /etc/os-release 2>/dev/null; then
+  INSTALL_UI=0
+fi
 
-# ──── Helpers ────────────────────────────────────────────────────────────────
 require_root() {
   if [[ ${EUID:-0} -ne 0 ]]; then
-    print_error "This script must be run as root (try: sudo bash $0 ...)"
+    print_error "Run as root (sudo bash $0 ...)"
   fi
 }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-run_as_login_user() {
-  # Run as the invoking user if available; otherwise root.
-  local user="${SUDO_USER:-root}"
-  local cmd="$*"
+mask_key() {
+  local k="${1:-}"
+  if [[ -z "$k" ]]; then echo "(none)"; return; fi
+  if [[ ${#k} -le 8 ]]; then echo "****"; return; fi
+  echo "${k:0:4}...${k: -4}"
+}
 
-  if [[ "$user" == "root" ]]; then
-    bash -lc "$cmd"
-  else
-    # Keep HOME sane for CLI login flows
-    sudo -u "$user" -H bash -lc "$cmd"
+disable_pve_enterprise_if_needed() {
+  local ent="/etc/apt/sources.list.d/pve-enterprise.list"
+  [[ -f "$ent" ]] || return 0
+  if grep -qE '^[[:space:]]*deb' "$ent"; then
+    print_warning "Disabling Proxmox enterprise apt repo (common 401 without subscription)"
+    mkdir -p /etc/apt/sources.list.d/disabled
+    mv "$ent" "/etc/apt/sources.list.d/disabled/pve-enterprise.list.bak.$(date +%Y%m%d%H%M%S)"
+  fi
+  if [[ -d /etc/pve ]] && ! grep -Rqs 'pve-no-subscription' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+    local codename=""
+    if [[ -r /etc/os-release ]]; then
+      # shellcheck disable=SC1091
+      . /etc/os-release
+      codename="${VERSION_CODENAME:-}"
+    fi
+    if [[ -z "$codename" ]] && have_cmd pveversion; then
+      local pve_major
+      pve_major=$(pveversion 2>/dev/null | head -1 | cut -d'/' -f2 | cut -d'.' -f1 || true)
+      case "${pve_major:-}" in
+        8) codename="bookworm" ;;
+        9) codename="trixie" ;;
+      esac
+    fi
+    if [[ -n "$codename" ]]; then
+      print_info "Adding pve-no-subscription repo for $codename"
+      echo "deb http://download.proxmox.com/debian/pve ${codename} pve-no-subscription" \
+        > /etc/apt/sources.list.d/pve-no-subscription.list
+    else
+      print_warning "Could not detect Debian codename; add pve-no-subscription manually if apt update fails"
+    fi
   fi
 }
 
-detect_os() {
-  if [[ -r /etc/os-release ]]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    OS_NAME="${NAME:-unknown}"
-    OS_ID="${ID:-unknown}"
-    OS_VERSION="${VERSION_ID:-unknown}"
-    OS_CODENAME="${VERSION_CODENAME:-}"
-  else
-    OS_NAME="unknown"; OS_ID="unknown"; OS_VERSION="unknown"; OS_CODENAME=""
+apt_update_soft() {
+  if apt-get update -qq; then
+    return 0
   fi
+  print_warning "apt-get update failed; checking Proxmox enterprise repo..."
+  disable_pve_enterprise_if_needed
+  apt-get update -qq
 }
 
 usage() {
   cat <<EOF
-NetBird Client Installer
+NetBird Client Installer (Debian/Ubuntu/Proxmox)
 
 Options:
-  --management-url <url>   Set Management URL (default: $MANAGEMENT_URL_DEFAULT)
-  --no-ui                  Do NOT install netbird-ui
-  --no-up                  Do NOT run 'netbird up' (installs only)
-  -h, --help               Show this help
+  --management-url <url>   Management URL (default: ${MANAGEMENT_URL_DEFAULT})
+  --setup-key <key>        Setup key for unattended enroll (or NETBIRD_SETUP_KEY)
+  --no-ui                  Do not install netbird-ui (default on Proxmox)
+  --ui                     Install netbird-ui (desktop)
+  --no-up                  Install only; do not run 'netbird up'
+  -h, --help               Show help
 
 Env:
-  NETBIRD_MANAGEMENT_URL   Alternative way to set management URL
+  NETBIRD_MANAGEMENT_URL   Same as --management-url
+  NETBIRD_SETUP_KEY        Same as --setup-key
 
+Proxmox tip:
+  curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/install-netbird-client.sh \\
+    | sudo bash -s -- --no-ui --setup-key "\$NETBIRD_SETUP_KEY"
 EOF
 }
 
@@ -98,128 +133,103 @@ parse_args() {
     case "$1" in
       --management-url)
         [[ $# -ge 2 ]] || print_error "--management-url requires a value"
-        MANAGEMENT_URL="$2"
-        shift 2
-        ;;
-      --no-ui)
-        INSTALL_UI=0
-        shift
-        ;;
-      --no-up)
-        DO_UP=0
-        shift
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      *)
-        print_error "Unknown option: $1 (use --help)"
-        ;;
+        MANAGEMENT_URL="$2"; shift 2 ;;
+      --setup-key)
+        [[ $# -ge 2 ]] || print_error "--setup-key requires a value"
+        SETUP_KEY="$2"; shift 2 ;;
+      --no-ui) INSTALL_UI=0; shift ;;
+      --ui)    INSTALL_UI=1; shift ;;
+      --no-up) DO_UP=0; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) print_error "Unknown option: $1 (use --help)" ;;
     esac
   done
 }
 
-# ──── Header ────────────────────────────────────────────────────────────────
 echo ""
 echo "${BLUE}┌──────────────────────────────────────────────────────────────┐${RESET}"
 echo "${BLUE}│              NetBird Client Install (apt-based)              │${RESET}"
 echo "${BLUE}└──────────────────────────────────────────────────────────────┘${RESET}"
 echo ""
 
-# ──── 0. Preflight ───────────────────────────────────────────────────────────
 require_root
 parse_args "$@"
-detect_os
 
-print_info "Detected OS: ${OS_NAME} (id=${OS_ID}, version=${OS_VERSION}, codename=${OS_CODENAME:-n/a})"
-
-if ! have_cmd apt-get; then
-  print_error "apt-get not found. This script supports Debian/Ubuntu/Proxmox (apt-based) only."
+if [[ -r /etc/os-release ]]; then
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  print_info "Detected OS: ${PRETTY_NAME:-$NAME} (id=${ID:-?}, version=${VERSION_ID:-?}, codename=${VERSION_CODENAME:-n/a})"
 fi
 
-# ──── 1. Dependencies ───────────────────────────────────────────────────────
+have_cmd apt-get || print_error "apt-get not found (Debian/Ubuntu/Proxmox only)"
+
 echo ""
 echo "${BLUE}┌─────────────────────────────┐${RESET}"
-echo "${BLUE}│ 1. Installing Dependencies  │${RESET}"
+echo "${BLUE}│ 1. Dependencies             │${RESET}"
 echo "${BLUE}└─────────────────────────────┘${RESET}"
 echo ""
 
+disable_pve_enterprise_if_needed
 print_info "Updating package lists..."
-apt-get update -qq
-
+apt_update_soft
 print_info "Installing prerequisites (ca-certificates, curl, gnupg)..."
-apt-get install -y ca-certificates curl gnupg >/dev/null
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl gnupg >/dev/null
 print_success "Prerequisites installed"
 
-# ──── 2. Repo + Keyring ─────────────────────────────────────────────────────
 echo ""
 echo "${BLUE}┌─────────────────────────────┐${RESET}"
-echo "${BLUE}│ 2. Configuring NetBird Repo │${RESET}"
+echo "${BLUE}│ 2. NetBird apt repository   │${RESET}"
 echo "${BLUE}└─────────────────────────────┘${RESET}"
 echo ""
 
-# Create keyring directory if needed
 mkdir -p "$(dirname "$NETBIRD_KEYRING")"
+print_info "Installing NetBird signing key..."
+tmp_key="$(mktemp)"
+curl -fsSL "$NETBIRD_KEY_URL" -o "$tmp_key"
+gpg --batch --yes --dearmor -o "$NETBIRD_KEYRING" "$tmp_key"
+chmod 0644 "$NETBIRD_KEYRING"
+rm -f "$tmp_key"
+print_success "Keyring: $NETBIRD_KEYRING"
 
-# Install keyring (idempotent)
-if [[ -s "$NETBIRD_KEYRING" ]]; then
-  print_success "Keyring already present: $NETBIRD_KEYRING"
-else
-  print_info "Downloading and installing NetBird signing key..."
-  curl -fsSL "$NETBIRD_KEY_URL" | gpg --dearmor --output "$NETBIRD_KEYRING"
-  chmod 0644 "$NETBIRD_KEYRING"
-  print_success "Keyring installed: $NETBIRD_KEYRING"
-fi
-
-# Install repo list (idempotent)
-REPO_LINE="deb [signed-by=$NETBIRD_KEYRING] $NETBIRD_REPO_URL stable main"
-
-if [[ -f "$NETBIRD_LIST" ]] && grep -qF "$REPO_LINE" "$NETBIRD_LIST"; then
-  print_success "Repo already configured: $NETBIRD_LIST"
-else
-  print_info "Writing repo file: $NETBIRD_LIST"
-  echo "$REPO_LINE" > "$NETBIRD_LIST"
-  print_success "Repo configured"
-fi
+REPO_LINE="deb [signed-by=${NETBIRD_KEYRING}] ${NETBIRD_REPO_URL} stable main"
+echo "$REPO_LINE" > "$NETBIRD_LIST"
+print_success "Repo: $NETBIRD_LIST"
 
 print_info "Refreshing package lists..."
-apt-get update -qq
+apt_update_soft
 print_success "Package lists refreshed"
 
-# ──── 3. Install NetBird ────────────────────────────────────────────────────
 echo ""
 echo "${BLUE}┌─────────────────────────────┐${RESET}"
-echo "${BLUE}│ 3. Installing NetBird       │${RESET}"
+echo "${BLUE}│ 3. Install packages         │${RESET}"
 echo "${BLUE}└─────────────────────────────┘${RESET}"
 echo ""
 
 print_info "Installing netbird..."
-apt-get install -y netbird >/dev/null
-print_success "Installed: netbird"
+DEBIAN_FRONTEND=noninteractive apt-get install -y netbird >/dev/null
+print_success "Installed: netbird ($(netbird version 2>/dev/null || echo unknown))"
 
 if [[ $INSTALL_UI -eq 1 ]]; then
-  print_info "Installing netbird-ui..."
-  apt-get install -y netbird-ui >/dev/null
-  print_success "Installed: netbird-ui"
+  print_info "Installing netbird-ui (desktop UI)..."
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y netbird-ui >/dev/null; then
+    print_success "Installed: netbird-ui"
+  else
+    print_warning "netbird-ui install failed (CLI is enough on servers)"
+  fi
 else
-  print_warning "Skipping netbird-ui (--no-ui set)"
+  print_warning "Skipping netbird-ui (use --ui to force)"
 fi
 
-# Enable/start service if present (best-effort)
 if have_cmd systemctl; then
-  if systemctl list-unit-files | grep -q '^netbird\.service'; then
-    print_info "Enabling and starting netbird.service..."
+  if systemctl list-unit-files --type=service 2>/dev/null | grep -q '^netbird\.service'; then
+    print_info "Enabling netbird.service..."
     systemctl enable --now netbird.service >/dev/null 2>&1 || true
     print_success "netbird.service enable/start attempted"
   else
-    print_warning "netbird.service not found in systemd unit list (may still work via 'netbird up')"
+    print_warning "netbird.service not listed yet (netbird up will still work)"
   fi
-else
-  print_warning "systemctl not found (container without systemd?). You can still run 'netbird up'."
 fi
 
-# ──── 4. Bring up (optional) ────────────────────────────────────────────────
 echo ""
 echo "${BLUE}┌─────────────────────────────┐${RESET}"
 echo "${BLUE}│ 4. netbird up               │${RESET}"
@@ -227,32 +237,39 @@ echo "${BLUE}└─────────────────────�
 echo ""
 
 print_info "Management URL: $MANAGEMENT_URL"
+print_info "Setup key: $(mask_key "$SETUP_KEY")"
 
 if [[ $DO_UP -eq 1 ]]; then
-  if have_cmd netbird; then
-    print_info "Running: netbird up --management-url \"$MANAGEMENT_URL\""
-    print_warning "If this is a headless machine, NetBird may output a login link/code in the terminal."
-    run_as_login_user "netbird up --management-url \"$MANAGEMENT_URL\""
-    print_success "netbird up completed (or provided login instructions)"
+  have_cmd netbird || print_error "netbird binary missing after install"
+  up_args=(up --management-url "$MANAGEMENT_URL")
+  if [[ -n "$SETUP_KEY" ]]; then
+    up_args+=(--setup-key "$SETUP_KEY")
+    print_info "Running: netbird up --management-url ... --setup-key (masked)"
   else
-    print_error "netbird binary not found after install (unexpected)"
+    print_warning "No setup key provided — NetBird may prompt for interactive/SSO login"
+    print_info "Running: netbird up --management-url \"$MANAGEMENT_URL\""
   fi
+  # Enroll as root so the daemon owns /etc/netbird on servers
+  netbird "${up_args[@]}"
+  print_success "netbird up finished"
+  print_info "Status:"
+  netbird status || true
 else
-  print_warning "Skipping 'netbird up' (--no-up set)"
+  print_warning "Skipped netbird up (--no-up)"
+  if [[ -n "$SETUP_KEY" ]]; then
+    print_info "Later: netbird up --management-url \"$MANAGEMENT_URL\" --setup-key '<your-key>'"
+  fi
 fi
 
-# ──── Summary ───────────────────────────────────────────────────────────────
 echo ""
 echo "${BLUE}┌───────────────────────────────┐${RESET}"
 echo "${BLUE}│ SUMMARY                       │${RESET}"
 echo "${BLUE}└───────────────────────────────┘${RESET}"
 echo ""
-
 print_success "Repo configured: $NETBIRD_LIST"
 print_success "Installed: netbird"
-[[ $INSTALL_UI -eq 1 ]] && print_success "Installed: netbird-ui" || print_warning "netbird-ui not installed"
-[[ $DO_UP -eq 1 ]] && print_success "Attempted: netbird up" || print_warning "netbird up skipped"
-
+[[ $INSTALL_UI -eq 1 ]] && print_success "UI: attempted netbird-ui" || print_warning "UI: skipped"
+[[ $DO_UP -eq 1 ]] && print_success "Enroll: netbird up attempted" || print_warning "Enroll: skipped"
 echo ""
 echo "${GREEN}Done.${RESET}"
 echo ""
