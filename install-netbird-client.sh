@@ -69,13 +69,19 @@ mask_key() {
 }
 
 disable_pve_enterprise_if_needed() {
-  local ent="/etc/apt/sources.list.d/pve-enterprise.list"
-  [[ -f "$ent" ]] || return 0
-  if grep -qE '^[[:space:]]*deb' "$ent"; then
-    print_warning "Disabling Proxmox enterprise apt repo (common 401 without subscription)"
-    mkdir -p /etc/apt/sources.list.d/disabled
-    mv "$ent" "/etc/apt/sources.list.d/disabled/pve-enterprise.list.bak.$(date +%Y%m%d%H%M%S)"
-  fi
+  # Disable ANY apt source pointing at enterprise.proxmox.com (PVE, Ceph, etc.)
+  mkdir -p /etc/apt/sources.list.d/disabled
+  local f
+  shopt -s nullglob
+  for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+    [[ -f "$f" ]] || continue
+    if grep -q 'enterprise.proxmox.com' "$f" 2>/dev/null; then
+      print_warning "Disabling Proxmox enterprise apt source: $f (common 401 without subscription)"
+      mv "$f" "/etc/apt/sources.list.d/disabled/$(basename "$f").bak.$(date +%Y%m%d%H%M%S)"
+    fi
+  done
+  shopt -u nullglob
+
   if [[ -d /etc/pve ]] && ! grep -Rqs 'pve-no-subscription' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
     local codename=""
     if [[ -r /etc/os-release ]]; then
@@ -99,15 +105,20 @@ disable_pve_enterprise_if_needed() {
       print_warning "Could not detect Debian codename; add pve-no-subscription manually if apt update fails"
     fi
   fi
+  return 0
 }
 
 apt_update_soft() {
   if apt-get update -qq; then
     return 0
   fi
-  print_warning "apt-get update failed; checking Proxmox enterprise repo..."
+  print_warning "apt-get update failed; disabling Proxmox enterprise repos and retrying..."
   disable_pve_enterprise_if_needed
-  apt-get update -qq
+  if apt-get update -qq; then
+    print_success "apt-get update OK after enterprise repo fix"
+    return 0
+  fi
+  print_error "apt-get update still failing after disabling enterprise.proxmox.com — fix apt sources, then re-run"
 }
 
 ensure_openssh() {
