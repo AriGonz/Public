@@ -3,6 +3,7 @@
 # Compatibility wrapper -> install-netbird-client.sh
 #
 # Keeps old one-liners working. Defaults to --no-ui (safe for Proxmox/servers).
+# Main script enables NetBird --allow-server-ssh and OpenSSH by default.
 #
 # Preferred:
 #   curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/install-netbird-client.sh \

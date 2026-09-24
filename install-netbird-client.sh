@@ -3,7 +3,8 @@
 # NetBird Client Installer (Debian / Ubuntu / Proxmox)
 #
 # Installs the official NetBird apt package and optionally enrolls the peer.
-# Setup keys are accepted only via flag or env — never hard-coded.
+# Setup keys are accepted only via flag or env - never hard-coded.
+# Enables NetBird --allow-server-ssh by default and ensures OpenSSH is running.
 #
 # Recommended (pipe so flags work):
 #   curl -fsSL https://raw.githubusercontent.com/AriGonz/Public/refs/heads/main/install-netbird-client.sh \
@@ -14,6 +15,7 @@
 #   sudo bash install-netbird-client.sh --no-ui --setup-key '....'
 #   sudo NETBIRD_SETUP_KEY='....' bash install-netbird-client.sh --no-ui
 #   sudo bash install-netbird-client.sh --management-url 'https://netbird.arigonz.com' --no-ui
+#   sudo bash install-netbird-client.sh --no-ui --no-ssh
 #
 # Note: bash -c "$(curl ...)" cannot pass --flags; use bash -s -- as above.
 # =============================================================================
@@ -45,6 +47,8 @@ SETUP_KEY="${NETBIRD_SETUP_KEY:-}"
 # Defaults: UI off on Proxmox hosts, on elsewhere (overridable)
 INSTALL_UI=1
 DO_UP=1
+ALLOW_SERVER_SSH=1   # NetBird embedded SSH; use --no-ssh to skip
+ENSURE_OPENSSH=1     # Install/enable openssh-server for SSH over the mesh
 if [[ -d /etc/pve ]] || grep -qi proxmox /etc/os-release 2>/dev/null; then
   INSTALL_UI=0
 fi
@@ -106,6 +110,33 @@ apt_update_soft() {
   apt-get update -qq
 }
 
+ensure_openssh() {
+  [[ $ENSURE_OPENSSH -eq 1 ]] || { print_warning "Skipping OpenSSH ensure (--no-openssh)"; return 0; }
+  echo ""
+  echo "${BLUE}┌─────────────────────────────┐${RESET}"
+  echo "${BLUE}│ OpenSSH server              │${RESET}"
+  echo "${BLUE}└─────────────────────────────┘${RESET}"
+  echo ""
+  if ! dpkg -s openssh-server >/dev/null 2>&1; then
+    print_info "Installing openssh-server..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server >/dev/null
+    print_success "Installed: openssh-server"
+  else
+    print_success "openssh-server already installed"
+  fi
+  if have_cmd systemctl; then
+    systemctl enable ssh.service >/dev/null 2>&1 || systemctl enable sshd.service >/dev/null 2>&1 || true
+    systemctl start ssh.service >/dev/null 2>&1 || systemctl start sshd.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet ssh.service 2>/dev/null || systemctl is-active --quiet sshd.service 2>/dev/null; then
+      print_success "SSH service is active"
+    else
+      print_warning "SSH service did not report active; check: systemctl status ssh"
+    fi
+  else
+    print_warning "systemctl not found; ensure sshd is running manually"
+  fi
+}
+
 usage() {
   cat <<EOF
 NetBird Client Installer (Debian/Ubuntu/Proxmox)
@@ -116,6 +147,9 @@ Options:
   --no-ui                  Do not install netbird-ui (default on Proxmox)
   --ui                     Install netbird-ui (desktop)
   --no-up                  Install only; do not run 'netbird up'
+  --allow-server-ssh       Enable NetBird embedded SSH (default)
+  --no-ssh                 Do not pass --allow-server-ssh
+  --no-openssh             Do not install/enable OpenSSH server
   -h, --help               Show help
 
 Env:
@@ -140,6 +174,9 @@ parse_args() {
       --no-ui) INSTALL_UI=0; shift ;;
       --ui)    INSTALL_UI=1; shift ;;
       --no-up) DO_UP=0; shift ;;
+      --allow-server-ssh) ALLOW_SERVER_SSH=1; shift ;;
+      --no-ssh) ALLOW_SERVER_SSH=0; shift ;;
+      --no-openssh) ENSURE_OPENSSH=0; shift ;;
       -h|--help) usage; exit 0 ;;
       *) print_error "Unknown option: $1 (use --help)" ;;
     esac
@@ -230,6 +267,8 @@ if have_cmd systemctl; then
   fi
 fi
 
+ensure_openssh
+
 echo ""
 echo "${BLUE}┌─────────────────────────────┐${RESET}"
 echo "${BLUE}│ 4. netbird up               │${RESET}"
@@ -238,27 +277,52 @@ echo ""
 
 print_info "Management URL: $MANAGEMENT_URL"
 print_info "Setup key: $(mask_key "$SETUP_KEY")"
+if [[ $ALLOW_SERVER_SSH -eq 1 ]]; then
+  print_info "NetBird SSH: enabled (--allow-server-ssh)"
+else
+  print_info "NetBird SSH: disabled"
+fi
 
 if [[ $DO_UP -eq 1 ]]; then
   have_cmd netbird || print_error "netbird binary missing after install"
   up_args=(up --management-url "$MANAGEMENT_URL")
   if [[ -n "$SETUP_KEY" ]]; then
     up_args+=(--setup-key "$SETUP_KEY")
-    print_info "Running: netbird up --management-url ... --setup-key (masked)"
   else
-    print_warning "No setup key provided — NetBird may prompt for interactive/SSO login"
-    print_info "Running: netbird up --management-url \"$MANAGEMENT_URL\""
+    print_warning "No setup key provided - NetBird may prompt for interactive/SSO login"
+  fi
+  if [[ $ALLOW_SERVER_SSH -eq 1 ]]; then
+    up_args+=(--allow-server-ssh)
+  fi
+  # Mask setup key in the logged command line
+  log_args=()
+  for a in "${up_args[@]}"; do
+    if [[ -n "$SETUP_KEY" && "$a" == "$SETUP_KEY" ]]; then
+      log_args+=("(masked)")
+    else
+      log_args+=("$a")
+    fi
+  done
+  print_info "Running: netbird ${log_args[*]}"
+  # If already connected, bring down first so --allow-server-ssh sticks
+  if netbird status >/dev/null 2>&1; then
+    print_info "Existing NetBird session detected; running netbird down first"
+    netbird down || true
   fi
   # Enroll as root so the daemon owns /etc/netbird on servers
   netbird "${up_args[@]}"
   print_success "netbird up finished"
   print_info "Status:"
   netbird status || true
+  if [[ $ALLOW_SERVER_SSH -eq 1 ]]; then
+    print_warning "Also enable SSH Access on this peer (and a NetBird SSH policy) in the NetBird dashboard"
+  fi
 else
   print_warning "Skipped netbird up (--no-up)"
-  if [[ -n "$SETUP_KEY" ]]; then
-    print_info "Later: netbird up --management-url \"$MANAGEMENT_URL\" --setup-key '<your-key>'"
-  fi
+  later="netbird up --management-url \"$MANAGEMENT_URL\""
+  [[ -n "$SETUP_KEY" ]] && later+=" --setup-key '<your-key>'"
+  [[ $ALLOW_SERVER_SSH -eq 1 ]] && later+=" --allow-server-ssh"
+  print_info "Later: $later"
 fi
 
 echo ""
@@ -269,6 +333,8 @@ echo ""
 print_success "Repo configured: $NETBIRD_LIST"
 print_success "Installed: netbird"
 [[ $INSTALL_UI -eq 1 ]] && print_success "UI: attempted netbird-ui" || print_warning "UI: skipped"
+[[ $ENSURE_OPENSSH -eq 1 ]] && print_success "OpenSSH: ensured" || print_warning "OpenSSH: skipped"
+[[ $ALLOW_SERVER_SSH -eq 1 ]] && print_success "NetBird SSH: --allow-server-ssh" || print_warning "NetBird SSH: off"
 [[ $DO_UP -eq 1 ]] && print_success "Enroll: netbird up attempted" || print_warning "Enroll: skipped"
 echo ""
 echo "${GREEN}Done.${RESET}"
