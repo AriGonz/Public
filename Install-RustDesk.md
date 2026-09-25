@@ -9,6 +9,9 @@ uninstalls the stock client only.
 1. Installs RustDesk (x64) using **winget -> Chocolatey (`rustdesk.install`) -> official GitHub `.exe`**.
 2. Leaves the client on the public / default RustDesk network.
 3. Can uninstall (`-Uninstall`) via the same Auto order (winget -> Chocolatey -> registry).
+4. Detects install via HKLM Uninstall entries plus a real Program Files `rustdesk.exe`
+   (not PATH / Get-Command / Chocolatey shims alone). Chocolatey checksums are enforced
+   (no `--ignore-checksums`). `-Force` performs a real reinstall per source, then verifies.
 
 ## Requirements
 
@@ -21,7 +24,7 @@ uninstalls the stock client only.
 | Parameter | Purpose |
 |-----------|---------|
 | `-Source` | `Auto` (default), `Winget`, `Chocolatey`, or `Official` |
-| `-Force` | Reinstall even if already present |
+| `-Force` | Reinstall (uninstall+install / `--force` / re-download) even if already present |
 | `-Uninstall` | Remove RustDesk |
 | `-DotSourceOnly` | Load functions only (for a launcher) |
 

@@ -74,6 +74,11 @@ $script:OfficialUrls = @()
 
 $script:DownloadDir = Join-Path $env:TEMP 'install-rustdesk'
 
+$script:NormalInstallRoots = @(
+    'C:\Program Files\RustDesk',
+    'C:\Program Files (x86)\RustDesk'
+)
+
 # === HELPERS ===
 
 function Write-Section([string]$Title) {
@@ -81,13 +86,131 @@ function Write-Section([string]$Title) {
     Write-Host "=== $Title ==="
 }
 
+function Test-PathIsNormalRustDeskExe {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not $Path) { return $false }
+    $full = $null
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return $false }
+        $full = (Get-Item -LiteralPath $Path).FullName
+    } catch {
+        return $false
+    }
+    if ($full -notmatch '(?i)[\\/]rustdesk\.exe$') { return $false }
+    foreach ($root in $script:NormalInstallRoots) {
+        if ($full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-RustDeskUninstallEntries {
+    $regPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    @(Get-ItemProperty $regPaths -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -and ($_.DisplayName -match 'RustDesk') })
+}
+
+function Test-RustDeskInstalled {
+    # Authoritative install check: HKLM uninstall entry + real Program Files exe
+    # (or winget list / RustDesk service with Program Files exe present).
+    # Never use PATH / Get-Command / chocolatey shims / recursive ProgramData search.
+
+    $entries = Get-RustDeskUninstallEntries
+    foreach ($prop in $entries) {
+        if ($prop.InstallLocation) {
+            foreach ($name in @('rustdesk.exe', 'RustDesk.exe')) {
+                $try = Join-Path $prop.InstallLocation $name
+                if (Test-Path -LiteralPath $try) {
+                    Write-Host "Detected (registry InstallLocation): $try"
+                    return $true
+                }
+            }
+            foreach ($root in $script:NormalInstallRoots) {
+                if ($prop.InstallLocation.TrimEnd('\') -ieq $root.TrimEnd('\')) {
+                    foreach ($name in @('rustdesk.exe', 'RustDesk.exe')) {
+                        $try = Join-Path $root $name
+                        if (Test-Path -LiteralPath $try) {
+                            Write-Host "Detected (InstallLocation root): $try"
+                            return $true
+                        }
+                    }
+                }
+            }
+        }
+        if ($prop.DisplayIcon) {
+            $exe = ([string]$prop.DisplayIcon) -replace ',.*$', ''
+            if (Test-PathIsNormalRustDeskExe -Path $exe) {
+                Write-Host "Detected (registry DisplayIcon): $exe"
+                return $true
+            }
+        }
+    }
+
+    foreach ($root in $script:NormalInstallRoots) {
+        foreach ($name in @('rustdesk.exe', 'RustDesk.exe')) {
+            $try = Join-Path $root $name
+            if (Test-Path -LiteralPath $try) {
+                # Prefer registry proof; still accept Program Files exe when a
+                # matching uninstall entry exists (InstallLocation may be empty).
+                if ($entries.Count -gt 0) {
+                    Write-Host "Detected (Program Files + uninstall entry): $try"
+                    return $true
+                }
+            }
+        }
+    }
+
+    $winget = Find-Winget
+    if ($winget) {
+        $listOut = & $winget list --id $script:WingetId -e --disable-interactivity 2>$null
+        $listed = ($LASTEXITCODE -eq 0) -and ($listOut -match [regex]::Escape($script:WingetId))
+        if ($listed) {
+            foreach ($root in $script:NormalInstallRoots) {
+                foreach ($name in @('rustdesk.exe', 'RustDesk.exe')) {
+                    $try = Join-Path $root $name
+                    if (Test-Path -LiteralPath $try) {
+                        Write-Host "Detected (winget list + Program Files): $try"
+                        return $true
+                    }
+                }
+            }
+        }
+    }
+
+    $svc = Get-Service -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match '(?i)rustdesk' -or
+            $_.DisplayName -match '(?i)rustdesk'
+        } |
+        Select-Object -First 1
+    if ($svc) {
+        foreach ($root in $script:NormalInstallRoots) {
+            foreach ($name in @('rustdesk.exe', 'RustDesk.exe')) {
+                $try = Join-Path $root $name
+                if (Test-Path -LiteralPath $try) {
+                    Write-Host "Detected (service + Program Files): $try"
+                    return $true
+                }
+            }
+        }
+    }
+
+    return $false
+}
+
 function Find-RustDeskExe {
+    # Optional helper after a confirmed install (logging only).
+    # Known Program Files paths + registry InstallLocation/DisplayIcon only.
+    # No PATH / Get-Command; no recursive ProgramData/chocolatey search.
     $candidates = @(
         'C:\Program Files\RustDesk\rustdesk.exe',
         'C:\Program Files\RustDesk\RustDesk.exe',
         'C:\Program Files (x86)\RustDesk\rustdesk.exe',
-        'C:\Program Files (x86)\RustDesk\RustDesk.exe',
-        'C:\ProgramData\chocolatey\bin\rustdesk.exe'
+        'C:\Program Files (x86)\RustDesk\RustDesk.exe'
     )
     foreach ($p in $candidates) {
         if (Test-Path -LiteralPath $p) {
@@ -96,59 +219,26 @@ function Find-RustDeskExe {
         }
     }
 
-    $cmd = Get-Command rustdesk -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source -and (Test-Path $cmd.Source)) {
-        Write-Host "RustDesk exe (Get-Command): $($cmd.Source)"
-        return $cmd.Source
-    }
-
-    $regPaths = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-    )
-    $props = Get-ItemProperty $regPaths -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -match 'RustDesk' }
-    foreach ($prop in $props) {
-        foreach ($field in @($prop.DisplayIcon, $prop.InstallLocation)) {
-            if (-not $field) { continue }
-            $exe = $field -replace ',.*$', ''
-            if ($exe -and (Test-Path -LiteralPath $exe) -and ($exe -match 'rustdesk\.exe$')) {
-                Write-Host "RustDesk exe (registry): $exe"
+    foreach ($prop in (Get-RustDeskUninstallEntries)) {
+        if ($prop.DisplayIcon) {
+            $exe = ([string]$prop.DisplayIcon) -replace ',.*$', ''
+            if ($exe -and (Test-Path -LiteralPath $exe) -and ($exe -match '(?i)rustdesk\.exe$')) {
+                Write-Host "RustDesk exe (registry DisplayIcon): $exe"
                 return (Get-Item -LiteralPath $exe).FullName
             }
-            if ($prop.InstallLocation) {
-                $try = Join-Path $prop.InstallLocation 'rustdesk.exe'
+        }
+        if ($prop.InstallLocation) {
+            foreach ($name in @('rustdesk.exe', 'RustDesk.exe')) {
+                $try = Join-Path $prop.InstallLocation $name
                 if (Test-Path -LiteralPath $try) {
                     Write-Host "RustDesk exe (InstallLocation): $try"
                     return (Get-Item -LiteralPath $try).FullName
-                }
-                $try2 = Join-Path $prop.InstallLocation 'RustDesk.exe'
-                if (Test-Path -LiteralPath $try2) {
-                    Write-Host "RustDesk exe (InstallLocation): $try2"
-                    return (Get-Item -LiteralPath $try2).FullName
                 }
             }
         }
     }
 
-    $found = Get-ChildItem 'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData\chocolatey' `
-        -Recurse -Filter 'rustdesk.exe' -ErrorAction SilentlyContinue |
-        Select-Object -First 1 -ExpandProperty FullName
-    if ($found) {
-        Write-Host "RustDesk exe (search): $found"
-        return $found
-    }
-
     return $null
-}
-
-function Test-RustDeskInstalled {
-    $exe = Find-RustDeskExe
-    if ($exe) {
-        Write-Host "Detected: $exe"
-        return $true
-    }
-    return $false
 }
 
 function Find-Winget {
@@ -186,18 +276,55 @@ function Install-ChocolateyIfMissing {
 }
 
 function Install-ViaWinget {
+    param([switch]$Force)
+
     $winget = Find-Winget
     if (-not $winget) {
         Write-Host 'winget: not found'
         return $false
     }
     Write-Host "winget: $winget"
+
+    $didReinstall = $false
+    if ($Force) {
+        Write-Host "winget: -Force requested - uninstall then install $($script:WingetId)"
+        & $winget uninstall --id $script:WingetId -e --silent --disable-interactivity --accept-source-agreements --scope machine 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            & $winget uninstall --id $script:WingetId -e --silent --disable-interactivity --accept-source-agreements 2>&1 | Out-Host
+        }
+        $didReinstall = $true
+    }
+
     Write-Host "winget: install $($script:WingetId) ..."
-    & $winget install --id $script:WingetId -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --scope machine 2>&1 | Out-Host
+    $installArgs = @(
+        'install', '--id', $script:WingetId, '-e',
+        '--silent', '--accept-package-agreements', '--accept-source-agreements',
+        '--disable-interactivity', '--scope', 'machine'
+    )
+    if ($Force) {
+        $installArgs += '--force'
+    }
+    & $winget @installArgs 2>&1 | Out-Host
     $code = $LASTEXITCODE
     # 0 = ok; -1978335189 = already installed
-    if ($code -eq 0 -or $code -eq -1978335189) {
+    if ($code -eq 0) {
         Write-Host "winget: OK (exit $code)"
+        return $true
+    }
+    if ($code -eq -1978335189) {
+        if ($Force -and -not $didReinstall) {
+            Write-Host 'winget: FAIL (already installed with -Force but no reinstall ran)'
+            return $false
+        }
+        if ($Force) {
+            # Uninstall+install ran but winget still reported already-installed.
+            # Treat as failure unless Test-RustDeskInstalled confirms a real install
+            # after the caller verifies; here report false so Auto can try next source
+            # only if verify would also fail - prefer requiring a real reinstall.
+            Write-Host 'winget: FAIL (already installed exit after Force reinstall path)'
+            return $false
+        }
+        Write-Host "winget: OK (exit $code already installed)"
         return $true
     }
     Write-Host "winget: FAIL (exit $code)"
@@ -205,24 +332,33 @@ function Install-ViaWinget {
 }
 
 function Install-ViaChocolatey {
+    param([switch]$Force)
+
     if (-not (Install-ChocolateyIfMissing)) {
         Write-Host 'choco: unavailable'
         return $false
     }
-    Write-Host "choco: install $($script:ChocoId) ..."
-    & choco install $script:ChocoId -y --no-progress --ignore-checksums 2>&1 | Out-Host
+
+    $chocoArgs = @('install', $script:ChocoId, '-y', '--no-progress')
+    if ($Force) {
+        $chocoArgs += '--force'
+        Write-Host "choco: install $($script:ChocoId) (with --force) ..."
+    } else {
+        Write-Host "choco: install $($script:ChocoId) ..."
+    }
+    & choco @chocoArgs 2>&1 | Out-Host
     if ($LASTEXITCODE -eq 0) {
-        if (Find-RustDeskExe) {
-            Write-Host 'choco: OK (exe present)'
+        if (Test-RustDeskInstalled) {
+            Write-Host 'choco: OK (installed)'
             return $true
         }
-        Write-Host 'choco: package OK but exe missing - forcing rustdesk.install'
-        & choco install rustdesk.install -y --force --no-progress --ignore-checksums 2>&1 | Out-Host
-        if (Find-RustDeskExe) {
-            Write-Host 'choco: OK after force (exe present)'
+        Write-Host 'choco: package OK but not detected - forcing rustdesk.install'
+        & choco install rustdesk.install -y --force --no-progress 2>&1 | Out-Host
+        if (Test-RustDeskInstalled) {
+            Write-Host 'choco: OK after force (installed)'
             return $true
         }
-        Write-Host 'choco: FAIL (exe still missing)'
+        Write-Host 'choco: FAIL (still not detected)'
         return $false
     }
     Write-Host "choco: FAIL (exit $LASTEXITCODE)"
@@ -294,6 +430,12 @@ function Get-OfficialInstaller {
 }
 
 function Install-ViaOfficial {
+    param([switch]$Force)
+
+    if ($Force) {
+        Write-Host 'official: -Force requested - download and run silent install again'
+    }
+
     $installer = Get-OfficialInstaller
     if (-not $installer) {
         Write-Host 'official: no installer downloaded'
@@ -442,9 +584,11 @@ function Invoke-RegistryUninstallString {
         return $false
     }
 
+    # Always wrap the split pipeline in @(...) so a single token stays an array;
+    # otherwise PowerShell collapses it to a string and += glues flags together.
     $argList = @()
     if ($argLine) {
-        $argList = $argLine -split '\s+' | Where-Object { $_ }
+        $argList = @($argLine -split '\s+' | Where-Object { $_ })
     }
     if (-not $preferQuiet) {
         foreach ($f in $ExeSilentFlags) {
@@ -555,28 +699,31 @@ function Install-RustDesk {
         Write-Host 'Already installed - skip install (use -Force to reinstall)'
         $ok = $true
     } else {
+        if ($Force -and $already) {
+            Write-Host 'Already installed - Force reinstall requested'
+        }
         switch ($Source) {
-            'Winget'     { $ok = Install-ViaWinget }
-            'Chocolatey' { $ok = Install-ViaChocolatey }
-            'Official'   { $ok = Install-ViaOfficial }
+            'Winget'     { $ok = Install-ViaWinget -Force:$Force }
+            'Chocolatey' { $ok = Install-ViaChocolatey -Force:$Force }
+            'Official'   { $ok = Install-ViaOfficial -Force:$Force }
             'Auto' {
-                $ok = Install-ViaWinget
+                $ok = Install-ViaWinget -Force:$Force
                 if (-not $ok) {
                     Write-Host 'Auto: winget failed - try Chocolatey'
-                    $ok = Install-ViaChocolatey
+                    $ok = Install-ViaChocolatey -Force:$Force
                 }
                 if (-not $ok) {
                     Write-Host 'Auto: Chocolatey failed - try official download'
-                    $ok = Install-ViaOfficial
+                    $ok = Install-ViaOfficial -Force:$Force
                 }
             }
         }
 
-        if ($ok -and -not (Find-RustDeskExe)) {
-            Write-Host 'Package reported OK but exe missing - forcing rustdesk.install'
+        if ($ok -and -not (Test-RustDeskInstalled)) {
+            Write-Host 'Package reported OK but install not detected - forcing rustdesk.install'
             if (Install-ChocolateyIfMissing) {
-                & choco install rustdesk.install -y --force --no-progress --ignore-checksums 2>&1 | Out-Host
-                $ok = [bool](Find-RustDeskExe)
+                & choco install rustdesk.install -y --force --no-progress 2>&1 | Out-Host
+                $ok = Test-RustDeskInstalled
             } else {
                 $ok = $false
             }
@@ -589,10 +736,19 @@ function Install-RustDesk {
     }
 
     if (Test-RustDeskInstalled) {
-        Write-Host 'Verify: installed'
-    } else {
-        Write-Host 'Verify: install reported OK but exe not seen yet (may need refresh)'
+        $exe = Find-RustDeskExe
+        if ($exe) { Write-Host "Verify: installed ($exe)" }
+        else { Write-Host 'Verify: installed' }
+        Write-Host 'RESULT: SUCCESS'
+        return $true
     }
+
+    if ($Force) {
+        Write-Host 'RESULT: FAILED (Force path did not leave a verified install)'
+        return $false
+    }
+
+    Write-Host 'Verify: install reported OK but not detected yet (may need refresh)'
     Write-Host 'RESULT: SUCCESS'
     return $true
 }
