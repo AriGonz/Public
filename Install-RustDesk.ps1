@@ -97,8 +97,13 @@ function Test-PathIsNormalRustDeskExe {
         return $false
     }
     if ($full -notmatch '(?i)[\\/]rustdesk\.exe$') { return $false }
+    # Require the exe's parent directory to equal a known install root.
+    # A prefix-only check would accept C:\Program Files\RustDesk-Portable\...
+    $parent = [System.IO.Path]::GetDirectoryName($full)
+    if (-not $parent) { return $false }
     foreach ($root in $script:NormalInstallRoots) {
-        if ($full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+        $rootFull = $root.TrimEnd('\', '/')
+        if ([string]::Equals($parent, $rootFull, [StringComparison]::OrdinalIgnoreCase)) {
             return $true
         }
     }
@@ -442,16 +447,29 @@ function Install-ViaOfficial {
         return $false
     }
     Write-Host "official: silent install $installer (--silent-install)"
-    $p = Start-Process -FilePath $installer `
-        -ArgumentList @('--silent-install') `
-        -Wait -PassThru
-    $code = $p.ExitCode
-    if ($code -eq 0) {
-        Write-Host "official: OK (exit $code)"
-        return $true
+    try {
+        $p = Start-Process -FilePath $installer `
+            -ArgumentList @('--silent-install') `
+            -Wait -PassThru -ErrorAction Stop
+        if ($null -eq $p) {
+            Write-Host 'official: FAIL (Start-Process returned null)'
+            return $false
+        }
+        $code = $p.ExitCode
+        if ($null -eq $code) {
+            Write-Host 'official: FAIL (null exit code)'
+            return $false
+        }
+        if ($code -eq 0) {
+            Write-Host "official: OK (exit $code)"
+            return $true
+        }
+        Write-Host "official: FAIL (exit $code)"
+        return $false
+    } catch {
+        Write-Host "official: exception $_"
+        return $false
     }
-    Write-Host "official: FAIL (exit $code)"
-    return $false
 }
 
 function Uninstall-ViaWinget {
@@ -598,9 +616,17 @@ function Invoke-RegistryUninstallString {
 
     Write-Host ("registry: Start-Process {0} {1}" -f $exe, ($argList -join ' '))
     try {
-        $p = Start-Process -FilePath $exe -ArgumentList $argList -Wait -PassThru
+        $p = Start-Process -FilePath $exe -ArgumentList $argList -Wait -PassThru -ErrorAction Stop
+        if ($null -eq $p) {
+            Write-Host 'registry EXE: FAIL (Start-Process returned null)'
+            return $false
+        }
         $code = $p.ExitCode
-        if ($code -eq 0 -or $null -eq $code) {
+        if ($null -eq $code) {
+            Write-Host 'registry EXE: FAIL (null exit code)'
+            return $false
+        }
+        if ($code -eq 0) {
             Write-Host "registry EXE: OK (exit $code)"
             return $true
         }
