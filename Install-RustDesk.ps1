@@ -1,19 +1,13 @@
 # =============================================================================
 # Install-RustDesk.ps1
 #
-# What:  Installs RustDesk on Windows (x64) and optionally points it at a
-#        self-hosted / private relay.
-# Why:   One script you can curl / irm from a public GitHub repo - no baked-in
-#        secrets, no org-specific defaults.
+# What:  Installs (or uninstalls) stock RustDesk on Windows (x64) using the
+#        public / default RustDesk network. Stock client only (no custom backend).
+# Why:   One script you can curl / irm from a public GitHub repo.
 # How:   Run elevated (Administrator or SYSTEM). Auto install order:
 #        winget -> Chocolatey (rustdesk.install) -> official GitHub .exe.
-# Exit:  0 on success / already installed (+ relay OK when requested) /
-#        uninstalled or not present; 1 if install, relay, or uninstall fails.
-#
-# SECURITY
-#   Never put a relay private key (or any real key) in this file or in git.
-#   Pass -Server / -Key at run time, or set RUSTDESK_SERVER / RUSTDESK_KEY.
-#   -SkipRelay installs the client only (public RustDesk network).
+# Exit:  0 on success / already installed / uninstalled or not present;
+#        1 if install or uninstall fails.
 #
 # ---------------------------------------------------------------------------
 # HOW TO USE
@@ -23,34 +17,28 @@
 #
 #   curl.exe -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/Install-RustDesk.ps1 `
 #     -o Install-RustDesk.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RustDesk.ps1 `
-#     -Server 'relay.example.com' -Key 'YOUR_PUBLIC_KEY_BASE64'
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RustDesk.ps1
 #
-# 2) Env vars + irm | iex (good one-liner; set secrets in the shell first):
+# 2) irm | iex (one-liner):
 #
-#   $env:RUSTDESK_SERVER = 'relay.example.com'
-#   $env:RUSTDESK_KEY    = 'YOUR_PUBLIC_KEY_BASE64'
 #   irm https://raw.githubusercontent.com/OWNER/REPO/main/Install-RustDesk.ps1 | iex
 #
 # 3) irm into a scriptblock (pass named params without saving a file):
 #
 #   $s = Invoke-RestMethod https://raw.githubusercontent.com/OWNER/REPO/main/Install-RustDesk.ps1
-#   & ([scriptblock]::Create($s)) -Server 'relay.example.com' -Key 'YOUR_PUBLIC_KEY_BASE64'
+#   & ([scriptblock]::Create($s)) -Force
+#   & ([scriptblock]::Create($s)) -Source Official
+#   & ([scriptblock]::Create($s)) -Uninstall
 #
-# 4) Install client only (no private relay):
+# 4) Force reinstall / pick a source / uninstall:
 #
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-RustDesk.ps1 -SkipRelay
-#
-# 5) Force reinstall / pick a source / uninstall:
-#
-#   .\Install-RustDesk.ps1 -Server 'relay.example.com' -Key 'YOUR_PUBLIC_KEY_BASE64' -Force
-#   .\Install-RustDesk.ps1 -Source Official -SkipRelay
+#   .\Install-RustDesk.ps1 -Force
+#   .\Install-RustDesk.ps1 -Source Official
 #   .\Install-RustDesk.ps1 -Uninstall
 #
 # Notes:
-#   - Replace OWNER/REPO with the GitHub path that hosts this file.
-#   - irm | iex alone cannot take -Server/-Key on the same line; use env vars
-#     or the scriptblock pattern above.
+#   - Replace OWNER/REPO with the GitHub path that hosts this file
+#     (e.g. AriGonz/Public).
 #   - ASCII-only strings (safe for Windows PowerShell 5.1).
 # =============================================================================
 
@@ -60,19 +48,7 @@ param(
     [ValidateSet('Auto', 'Winget', 'Chocolatey', 'Official')]
     [string]$Source = 'Auto',
 
-    # Private / self-hosted rendezvous + relay hostname (no scheme, no path).
-    # Also read from $env:RUSTDESK_SERVER when this is empty.
-    [string]$Server = '',
-
-    # Relay public key (base64). Also read from $env:RUSTDESK_KEY when empty.
-    # Never commit a real value into this script.
-    [string]$Key = '',
-
-    # Install the client but do not write RustDesk2.toml / configure a relay.
-    [switch]$SkipRelay,
-
-    # Reinstall even if RustDesk is already detected (relay config still runs
-    # unless -SkipRelay).
+    # Reinstall even if RustDesk is already detected.
     [switch]$Force,
 
     # Uninstall instead of install (winget -> choco -> registry).
@@ -85,13 +61,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
-# === CONFIG (no secrets; org-agnostic) ===
-
-if (-not $Server -and $env:RUSTDESK_SERVER) { $Server = $env:RUSTDESK_SERVER.Trim() }
-if (-not $Key -and $env:RUSTDESK_KEY)       { $Key    = $env:RUSTDESK_KEY.Trim() }
-
-$script:RustDeskServer = $Server
-$script:RustDeskKey    = $Key
+# === CONFIG (stock client only; org-agnostic) ===
 
 # Winget id is often missing from the community source - still try in Auto.
 $script:WingetId = 'RustDesk.RustDesk'
@@ -109,12 +79,6 @@ $script:DownloadDir = Join-Path $env:TEMP 'install-rustdesk'
 function Write-Section([string]$Title) {
     Write-Host ''
     Write-Host "=== $Title ==="
-}
-
-function Mask-Secret([string]$Value) {
-    if (-not $Value) { return '(none)' }
-    if ($Value.Length -le 8) { return '****' }
-    return ($Value.Substring(0, 4) + '...' + $Value.Substring($Value.Length - 4))
 }
 
 function Find-RustDeskExe {
@@ -348,81 +312,6 @@ function Install-ViaOfficial {
     return $false
 }
 
-function Set-RustDeskRelay {
-    <#
-    .SYNOPSIS
-      Write RustDesk2.toml for a private relay across common config dirs,
-      refresh the service, and print the device ID.
-    #>
-    if (-not $script:RustDeskServer -or -not $script:RustDeskKey) {
-        Write-Host 'Relay: Server and Key are both required (use -Server/-Key or RUSTDESK_SERVER/RUSTDESK_KEY, or pass -SkipRelay).'
-        return $false
-    }
-
-    $exe = Find-RustDeskExe
-    if (-not $exe) {
-        Write-Host 'RustDesk exe not found - forcing choco rustdesk.install...'
-        if (Get-Command choco -ErrorAction SilentlyContinue) {
-            & choco install rustdesk.install -y --force --no-progress --ignore-checksums 2>&1 | Out-Host
-            $exe = Find-RustDeskExe
-        }
-    }
-    if (-not $exe) {
-        Write-Host 'RustDesk exe not found - skip relay config'
-        return $false
-    }
-
-    Write-Host "Using RustDesk exe: $exe"
-    Write-Host ("Relay server: {0}" -f $script:RustDeskServer)
-    Write-Host ("Relay key:    {0}" -f (Mask-Secret $script:RustDeskKey))
-
-    $toml = @"
-rendezvous_server = '$($script:RustDeskServer)'
-nat_type = 1
-serial = 0
-
-[options]
-custom-rendezvous-server = '$($script:RustDeskServer)'
-relay-server = '$($script:RustDeskServer)'
-key = '$($script:RustDeskKey)'
-api-server = ''
-"@
-
-    $dirs = @(
-        "$env:APPDATA\RustDesk\config",
-        'C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config'
-    )
-    Get-ChildItem 'C:\Users' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-        $u = Join-Path $_.FullName 'AppData\Roaming\RustDesk\config'
-        if ($dirs -notcontains $u) { $dirs += $u }
-    }
-    foreach ($d in $dirs) {
-        try {
-            New-Item -ItemType Directory -Force -Path $d | Out-Null
-            Set-Content -Path (Join-Path $d 'RustDesk2.toml') -Value $toml -Encoding ascii
-            Write-Host "Wrote RustDesk2.toml -> $d"
-        } catch {
-            Write-Host "Skip config dir $d : $_"
-        }
-    }
-
-    # Install / refresh service (non-blocking - -Wait can hang under SYSTEM)
-    Start-Process -FilePath $exe -ArgumentList '--install-service' -WindowStyle Hidden -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 3
-    Get-Service | Where-Object { $_.Name -match 'RustDesk' -or $_.DisplayName -match 'RustDesk' } | ForEach-Object {
-        if ($_.Status -ne 'Running') {
-            try { Start-Service $_.Name -ErrorAction SilentlyContinue } catch {}
-        }
-        Write-Host ("RustDesk service: {0} = {1}" -f $_.Name, $_.Status)
-    }
-
-    Write-Host '=== RustDesk ID ==='
-    $rdId = cmd /c "`"$exe`" --get-id" 2>&1
-    Write-Host $rdId
-    Write-Host "Relay: $($script:RustDeskServer)"
-    return $true
-}
-
 function Uninstall-ViaWinget {
     $winget = Find-Winget
     if (-not $winget) {
@@ -642,16 +531,15 @@ function Uninstall-RustDesk {
 function Install-RustDesk {
     <#
     .SYNOPSIS
-      Install RustDesk via winget, Chocolatey, and/or official GitHub exe,
-      then optionally configure a private relay from -Server/-Key (or env).
+      Install stock RustDesk via winget, Chocolatey, and/or official GitHub exe.
+      Uses the public / default RustDesk network (stock client only).
     #>
     [CmdletBinding()]
     param(
         [ValidateSet('Auto', 'Winget', 'Chocolatey', 'Official')]
         [string]$Source = 'Auto',
         [switch]$Force,
-        [switch]$Uninstall,
-        [switch]$SkipRelay
+        [switch]$Uninstall
     )
 
     if ($Uninstall) {
@@ -700,24 +588,10 @@ function Install-RustDesk {
         return $false
     }
 
-    if ($SkipRelay) {
-        Write-Host 'SkipRelay: leaving client on default (public) network'
-    } else {
-        if (-not $script:RustDeskServer -or -not $script:RustDeskKey) {
-            Write-Host 'RESULT: FAILED (relay config needs -Server and -Key, or RUSTDESK_SERVER and RUSTDESK_KEY; or pass -SkipRelay)'
-            return $false
-        }
-        Write-Section 'Configure RustDesk private relay'
-        if (-not (Set-RustDeskRelay)) {
-            Write-Host 'RESULT: FAILED (relay config)'
-            return $false
-        }
-    }
-
     if (Test-RustDeskInstalled) {
         Write-Host 'Verify: installed'
     } else {
-        Write-Host 'Verify: configured but exe not seen yet (may need refresh)'
+        Write-Host 'Verify: install reported OK but exe not seen yet (may need refresh)'
     }
     Write-Host 'RESULT: SUCCESS'
     return $true
@@ -732,6 +606,6 @@ if ($DotSourceOnly) {
 if ($Uninstall) {
     $ok = Uninstall-RustDesk
 } else {
-    $ok = Install-RustDesk -Source $Source -Force:$Force -SkipRelay:$SkipRelay
+    $ok = Install-RustDesk -Source $Source -Force:$Force
 }
 exit $(if ($ok) { 0 } else { 1 })
